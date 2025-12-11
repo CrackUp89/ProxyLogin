@@ -1,0 +1,127 @@
+package cognito
+
+import (
+	"proxylogin/internal/manager/handlers/login/types"
+)
+
+type RefreshMethod string
+
+var (
+	RefreshMethodAuto  RefreshMethod = "auto"
+	RefreshMethodAuth  RefreshMethod = "auth"
+	RefreshMethodToken RefreshMethod = "token"
+)
+
+type NextStepResponse struct {
+	NextStep NextStep    `json:"next_step,omitempty"`
+	Session  string      `json:"session,omitempty"`
+	Payload  interface{} `json:"payload,omitempty"`
+}
+
+type loginRequest struct {
+	User     string `json:"user"`
+	Password string `json:"password"`
+}
+
+type WithValidation interface {
+	Validate() types.ValidationIssues
+}
+
+func (r loginRequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.User) == 0 {
+		errs["user"] = "User is required"
+	}
+	if len(r.Password) == 0 {
+		errs["password"] = "Password is required"
+	}
+	return errs
+}
+
+type mfaSetupRequest struct {
+	Session string `json:"session"`
+	User    string `json:"user"`
+	MFAType string `json:"mfa_type"`
+}
+
+func (r mfaSetupRequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.User) == 0 {
+		errs["user"] = "User is required"
+	}
+	if len(r.Session) == 0 {
+		errs["session"] = "Session is required"
+	}
+	if len(r.MFAType) == 0 {
+		errs["mfa_type"] = "MFAType is required"
+	}
+	return errs
+}
+
+type mfaSetupVerifySoftwareTokenRequest struct {
+	Session string `json:"session"`
+	User    string `json:"user"`
+	Code    string `json:"code"`
+}
+
+func (r mfaSetupVerifySoftwareTokenRequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.User) == 0 {
+		errs["user"] = "User is required"
+	}
+	if len(r.Session) == 0 {
+		errs["password"] = "Session is required"
+	}
+	if len(r.Code) == 0 {
+		errs["code"] = "Code is required"
+	}
+	return errs
+}
+
+type mfaSoftwareTokenVerifyRequest struct {
+	Session string `json:"session"`
+	User    string `json:"user"`
+	Code    string `json:"code"`
+}
+
+func (r mfaSoftwareTokenVerifyRequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.User) == 0 {
+		errs["user"] = "User is required"
+	}
+	if len(r.Session) == 0 {
+		errs["password"] = "Session is required"
+	}
+	if len(r.Code) == 0 {
+		errs["code"] = "Code is required"
+	}
+	return errs
+}
+
+type refreshTokenRequest struct {
+	User  string `json:"user"`
+	Token string `json:"token"`
+}
+
+func (r refreshTokenRequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.User) == 0 {
+		errs["user"] = "User is required"
+	}
+	if len(r.Token) == 0 {
+		errs["token"] = "Token is required"
+	}
+	return errs
+}
+
+type logOutRequest struct {
+	Token string `json:"token"`
+}
+
+func (r logOutRequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.Token) == 0 {
+		errs["token"] = "Token is required"
+	}
+	return errs
+}
