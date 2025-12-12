@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"proxylogin/internal/manager/handlers/common"
 	"proxylogin/internal/manager/handlers/login/cognito"
 	"strings"
 	"syscall"
@@ -134,6 +135,8 @@ func main() {
 func serve(cmd *cobra.Command) error {
 	var err error
 	mux := http.NewServeMux()
+
+	common.AddRoutes(mux)
 
 	err = cognito.SetClientDetails(viper.GetString("cognito_client_id"), viper.GetString("cognito_client_secret"))
 	if err != nil {

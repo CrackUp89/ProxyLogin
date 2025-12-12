@@ -216,12 +216,16 @@ func createLogOut() http.Handler {
 		})
 }
 
+func defaultRequestSizeLimit(h http.Handler) http.Handler {
+	return tools.MaxRequestSizeLimiterMiddleware(h, 10*1024)
+}
+
 func AddRoutes(mux *http.ServeMux) *http.ServeMux {
-	mux.Handle("POST /v1/login", createLogin())
-	mux.Handle("POST /v1/mfasetup", createMFASetup())
-	mux.Handle("POST /v1/mfasetup/stverify", createMFASetupVerifySoftwareToken())
-	mux.Handle("POST /v1/stverify", createMFASoftwareTokenVerify())
-	mux.Handle("POST /v1/refresh", createRefreshToken())
-	mux.Handle("POST /v1/logout", createLogOut())
+	mux.Handle("POST /v1/login", defaultRequestSizeLimit(createLogin()))
+	mux.Handle("POST /v1/mfasetup", defaultRequestSizeLimit(createMFASetup()))
+	mux.Handle("POST /v1/mfasetup/stverify", defaultRequestSizeLimit(createMFASetupVerifySoftwareToken()))
+	mux.Handle("POST /v1/stverify", defaultRequestSizeLimit(createMFASoftwareTokenVerify()))
+	mux.Handle("POST /v1/refresh", defaultRequestSizeLimit(createRefreshToken()))
+	mux.Handle("POST /v1/logout", defaultRequestSizeLimit(createLogOut()))
 	return mux
 }
