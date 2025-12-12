@@ -55,3 +55,13 @@ func HTTPWriteJSON(w http.ResponseWriter, data interface{}) error {
 	}
 	return nil
 }
+
+func MaxRequestSizeLimiterMiddleware(next http.Handler, maxContentLength int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > maxContentLength {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
