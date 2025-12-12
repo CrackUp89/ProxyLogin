@@ -87,9 +87,9 @@ func init() {
 	viper.SetEnvPrefix("")
 	viper.AutomaticEnv()
 
-	serveCmd.Flags().StringP("address", "a", "", "Address to listen on")
+	serveCmd.Flags().StringP("address", "a", ":http", "Address to listen on")
 	bindViperFlag(serveCmd, "address", "")
-	viper.SetDefault("address", ":8383")
+	viper.SetDefault("address", ":http")
 
 	serveCmd.Flags().Uint64("workers", 1000, "Server workers count")
 	bindViperFlag(serveCmd, "workers", "workers")
