@@ -27,6 +27,7 @@ var (
 	useAuthToRefresh    bool
 	awsConfig           aws.Config
 	client              *cognitoidentityprovider.Client
+	poolDescription     *cognitoidentityprovider.DescribeUserPoolClientOutput
 )
 
 var sessionMutexManager = tools.NamedMutexManager{}
@@ -67,7 +68,7 @@ func Initialize() {
 	}
 	client = cognitoidentityprovider.NewFromConfig(awsConfig)
 
-	poolDescription := describeUserPool(client, cognitoUserPoolID, cognitoClientID)
+	poolDescription = describeUserPool(client, cognitoUserPoolID, cognitoClientID)
 
 	useAuthToRefresh = poolDescription.UserPoolClient.EnableTokenRevocation != nil && *poolDescription.UserPoolClient.EnableTokenRevocation
 
@@ -101,37 +102,59 @@ func authResultToTokenSet(authResult *types.AuthenticationResultType) loginTypes
 	return result
 }
 
-func handleChallenge(challenge types.ChallengeNameType, t Task, cognitoSessions string, payload interface{}) {
+func handleChallenge(challenge types.ChallengeNameType, challengeParameters map[string]string, task Task, cognitoSessions string) {
 
 	if challenge == "" {
-		t.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError("Authentication error", "Challenge is empty", nil),
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewGenericAuthenticationError("Challenge is empty", "Authentication error", nil),
 		}
 		return
 	}
 
+	tr := TaskResult{
+		SessionKey: task.SessionKey,
+	}
+
+	var sessionTag interface{} = nil
+	var nextStep NextStep
+
 	switch challenge {
 	case types.ChallengeNameTypeMfaSetup:
-		SetSession(t.SessionKey, cognitoSessions, NextStepMFASetup, time.Now())
-		t.ResultChan <- TaskResult{
-			NextStep:   NextStepMFASetup,
-			SessionKey: t.SessionKey,
-			Payload:    payload,
+		nextStep = NextStepMFASetup
+		v, ok := challengeParameters["MFAS_CAN_SETUP"]
+		if ok {
+			tr.Payload = map[string]interface{}{
+				"available_mfa_methods": mapMFAS(strings.Split(strings.Trim(v, "[]"), ",")),
+			}
+		} else {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.NewGenericAuthenticationError("No MFA methods available", "Authentication error", nil),
+			}
+			return
 		}
 		break
 	case types.ChallengeNameTypeSoftwareTokenMfa:
-		SetSession(t.SessionKey, cognitoSessions, NextStepMFASoftwareTokenVerify, time.Now())
-		t.ResultChan <- TaskResult{
-			NextStep:   NextStepMFASoftwareTokenVerify,
-			SessionKey: t.SessionKey,
-			Payload:    payload,
+		nextStep = NextStepMFASoftwareTokenVerify
+		break
+	case types.ChallengeNameTypeNewPasswordRequired:
+		nextStep = NextStepNewPassword
+		v, ok := challengeParameters["requiredAttributes"]
+		if ok {
+			tr.Payload = map[string]interface{}{
+				"required": v,
+			}
+			sessionTag = v
 		}
 		break
 	default:
-		t.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError("Authentication error", "Unsupported challenge type", nil),
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewGenericAuthenticationError("Unsupported challenge type", "Authentication error", nil),
 		}
 	}
+
+	SetSession(task.SessionKey, cognitoSessions, nextStep, time.Now(), sessionTag)
+	tr.NextStep = nextStep
+	task.ResultChan <- tr
 }
 
 func getTaskSession(t Task) (LoginSession, bool) {
@@ -234,21 +257,7 @@ func processLoginTask(task LoginTask) {
 		}
 	}
 
-	payload := make(map[string]interface{})
-
-	if result.ChallengeName == types.ChallengeNameTypeMfaSetup {
-		v, ok := result.ChallengeParameters["MFAS_CAN_SETUP"]
-		if ok {
-			payload["available_mfa_methods"] = mapMFAS(strings.Split(strings.Trim(v, "[]"), ","))
-		} else {
-			task.ResultChan <- TaskResult{
-				Err: loginTypes.NewGenericAuthenticationError("No MFA methods available", "Authentication error", nil),
-			}
-			return
-		}
-	}
-
-	handleChallenge(result.ChallengeName, task.Task, *result.Session, payload)
+	handleChallenge(result.ChallengeName, result.ChallengeParameters, task.Task, *result.Session)
 }
 
 func processMFASetupTask(task MFASetupTask) {
@@ -284,7 +293,7 @@ func processMFASetupTask(task MFASetupTask) {
 			return
 		}
 
-		SetSession(task.SessionKey, *associateResult.Session, NextStepMFASoftwareTokenSetupVerify, time.Now())
+		SetSession(task.SessionKey, *associateResult.Session, NextStepMFASoftwareTokenSetupVerify, time.Now(), nil)
 		task.ResultChan <- TaskResult{
 			NextStep:   NextStepMFASoftwareTokenSetupVerify,
 			SessionKey: task.SessionKey,
@@ -323,6 +332,13 @@ func processMFASetupVerifySoftwareTokenTask(task MFASetupVerifySoftwareTokenTask
 
 	verifyResult, err := client.VerifySoftwareToken(task.Context, verifyInput)
 	if err != nil {
+		var est *types.EnableSoftwareTokenMFAException
+		if errors.As(err, &est) {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.InvalidMFASetupSoftwareTokenError,
+			}
+			return
+		}
 		task.ResultChan <- TaskResult{
 			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Authentication error", err),
 		}
@@ -331,7 +347,7 @@ func processMFASetupVerifySoftwareTokenTask(task MFASetupVerifySoftwareTokenTask
 
 	if verifyResult.Status != types.VerifySoftwareTokenResponseTypeSuccess {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.InvalidMFASetupSoftwareTokenError,
+			Err: loginTypes.NewGenericAuthenticationError("no error raised but response is not successful", "Authentication error", nil),
 		}
 		return
 	}
@@ -364,7 +380,7 @@ func processMFASetupVerifySoftwareTokenTask(task MFASetupVerifySoftwareTokenTask
 		return
 	}
 
-	handleChallenge(finalResult.ChallengeName, task.Task, *finalResult.Session, nil)
+	handleChallenge(finalResult.ChallengeName, finalResult.ChallengeParameters, task.Task, *finalResult.Session)
 }
 
 func processMFASoftwareTokenVerifyTask(task MFASoftwareTokenVerifyTask) {
@@ -418,7 +434,7 @@ func processMFASoftwareTokenVerifyTask(task MFASoftwareTokenVerifyTask) {
 		}
 	}
 
-	handleChallenge(result.ChallengeName, task.Task, *result.Session, nil)
+	handleChallenge(result.ChallengeName, result.ChallengeParameters, task.Task, *result.Session)
 }
 
 func processRefreshTokenTask(task RefreshTokenTask) {
@@ -484,6 +500,78 @@ func processRefreshTokenTask(task RefreshTokenTask) {
 	}
 }
 
+func processSatisfyPasswordUpdateRequestTask(task SatisfyPasswordUpdateRequestTask) {
+	if !checkTaskContext(task.Task) {
+		return
+	}
+
+	unlockSession := lockSession(task.SessionKey)
+	defer unlockSession()
+
+	logger.Debug("processSatisfyPasswordUpdateRequestTask", zap.String("sessionKey", task.SessionKey), zap.String("username", task.Username))
+
+	var session LoginSession
+	if s, ok := getTaskSession(task.Task); !ok || !checkNextStep(task.Task, s, NextStepNewPassword) {
+		return
+	} else {
+		session = s
+	}
+
+	input := &cognitoidentityprovider.RespondToAuthChallengeInput{
+		ChallengeName: types.ChallengeNameTypeNewPasswordRequired,
+		ClientId:      aws.String(cognitoClientID),
+		Session:       aws.String(session.cognitoSession),
+		ChallengeResponses: map[string]string{
+			"USERNAME":     task.Username,
+			"NEW_PASSWORD": task.Password,
+		},
+	}
+
+	if cognitoClientSecret != "" {
+		input.ChallengeResponses["SECRET_HASH"] = computeSecretHash(cognitoClientSecret, task.Username, cognitoClientID)
+	}
+
+	result, err := client.RespondToAuthChallenge(task.Context, input)
+	if err != nil {
+		var pv *types.PasswordHistoryPolicyViolationException
+		if errors.As(err, &pv) {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.PasswordHistoryError,
+			}
+			return
+		}
+
+		var ip *types.InvalidPasswordException
+		if errors.As(err, &ip) {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.InvalidNewPasswordError,
+			}
+			return
+		}
+
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Authentication error", err),
+		}
+		return
+	}
+
+	if result.ChallengeName == "" {
+		if result.AuthenticationResult != nil {
+			task.ResultChan <- TaskResult{
+				Payload: authResultToTokenSet(result.AuthenticationResult),
+			}
+			return
+		} else {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.NewGenericAuthenticationError("no challenge requested and no authentication result received", "authentication error", nil),
+			}
+			return
+		}
+	}
+
+	handleChallenge(result.ChallengeName, result.ChallengeParameters, task.Task, *result.Session)
+}
+
 func processLogOutTask(task LogOutTask) {
 	if !checkTaskContext(task.Task) {
 		return
@@ -499,6 +587,29 @@ func processLogOutTask(task LogOutTask) {
 	}
 
 	_, err := client.RevokeToken(task.Context, input)
+
+	if err != nil {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Logout error", err),
+		}
+		return
+	}
+
+	task.ResultChan <- TaskResult{}
+}
+
+func processUpdatePasswordTask(task updatePasswordTask) {
+	if !checkTaskContext(task.Task) {
+		return
+	}
+
+	input := &cognitoidentityprovider.ChangePasswordInput{
+		AccessToken:      aws.String(task.AccessToken),
+		PreviousPassword: aws.String(task.CurrentPassword),
+		ProposedPassword: aws.String(task.NewPassword),
+	}
+
+	_, err := client.ChangePassword(task.Context, input)
 
 	if err != nil {
 		task.ResultChan <- TaskResult{

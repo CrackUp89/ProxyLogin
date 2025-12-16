@@ -17,12 +17,14 @@ const (
 	NextStepMFASetup                    NextStep = "mfa_setup"
 	NextStepMFASoftwareTokenSetupVerify NextStep = "mfa_software_token_setup_verify"
 	NextStepMFASoftwareTokenVerify      NextStep = "mfa_software_token_verify"
+	NextStepNewPassword                 NextStep = "new_password"
 )
 
 type LoginSession struct {
 	cognitoSession string
 	createdAt      time.Time
 	nextStep       NextStep
+	tag            interface{}
 }
 
 var activeSessions = new(sync.Map)
@@ -57,6 +59,6 @@ func GetSession(loginSession string) (LoginSession, bool) {
 	return LoginSession{}, false
 }
 
-func SetSession(loginSession string, cognitoSession string, nextStep NextStep, createdAt time.Time) {
-	activeSessions.Store(loginSession, LoginSession{cognitoSession, createdAt, nextStep})
+func SetSession(loginSession string, cognitoSession string, nextStep NextStep, createdAt time.Time, tag interface{}) {
+	activeSessions.Store(loginSession, LoginSession{cognitoSession, createdAt, nextStep, tag})
 }

@@ -67,3 +67,35 @@ func (i invalidUserOrPasswordError) Code() int {
 }
 
 var InvalidUserOrPasswordError = invalidUserOrPasswordError{}
+
+type passwordHistoryError struct{}
+
+func (i passwordHistoryError) Error() string {
+	return "can not reuse password"
+}
+
+func (i passwordHistoryError) PrivateError() string {
+	return "can not reuse password"
+}
+
+func (i passwordHistoryError) Code() int {
+	return 1003
+}
+
+var PasswordHistoryError = passwordHistoryError{}
+
+type invalidNewPasswordError struct{}
+
+func (i invalidNewPasswordError) Error() string {
+	return "invalid new password"
+}
+
+func (i invalidNewPasswordError) PrivateError() string {
+	return "invalid new password"
+}
+
+func (i invalidNewPasswordError) Code() int {
+	return 1004
+}
+
+var InvalidNewPasswordError = invalidNewPasswordError{}

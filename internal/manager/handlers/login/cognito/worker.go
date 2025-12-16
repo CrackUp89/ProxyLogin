@@ -132,6 +132,44 @@ func AddLogOutTask(ctx context.Context, sessionKey string, refreshToken string) 
 	return resultChan, nil
 }
 
+type SatisfyPasswordUpdateRequestTask struct {
+	Username   string
+	Password   string
+	Attributes map[string]string
+	Task
+}
+
+var maxSatisfyPasswordUpdateRequestTasks = 1000
+var satisfyPasswordUpdateRequestTasks = make(chan SatisfyPasswordUpdateRequestTask)
+
+func AddSatisfyPasswordUpdateRequestTask(ctx context.Context, sessionKey string, user string, password string, attributes map[string]string) (TaskResultChan, error) {
+	if len(satisfyPasswordUpdateRequestTasks) >= maxSatisfyPasswordUpdateRequestTasks {
+		return nil, types.NewTooManyTasks("LogOutTask")
+	}
+	resultChan := make(TaskResultChan)
+	satisfyPasswordUpdateRequestTasks <- SatisfyPasswordUpdateRequestTask{user, password, attributes, Task{ctx, sessionKey, resultChan}}
+	return resultChan, nil
+}
+
+type updatePasswordTask struct {
+	AccessToken     string
+	CurrentPassword string
+	NewPassword     string
+	Task
+}
+
+var maxUpdatePasswordTask = 1000
+var updatePasswordTasks = make(chan updatePasswordTask)
+
+func AddUpdatePasswordTask(ctx context.Context, accessToken string, currentPassword string, newPassword string) (TaskResultChan, error) {
+	if len(updatePasswordTasks) >= maxUpdatePasswordTask {
+		return nil, types.NewTooManyTasks("LogOutTask")
+	}
+	resultChan := make(TaskResultChan)
+	updatePasswordTasks <- updatePasswordTask{accessToken, currentPassword, newPassword, Task{ctx, "", resultChan}}
+	return resultChan, nil
+}
+
 func startWorker() chan bool {
 	stopChannel := make(chan bool)
 	go func() {
@@ -154,6 +192,12 @@ func startWorker() chan bool {
 				break
 			case t := <-logOutTasks:
 				processLogOutTask(t)
+				break
+			case t := <-satisfyPasswordUpdateRequestTasks:
+				processSatisfyPasswordUpdateRequestTask(t)
+				break
+			case t := <-updatePasswordTasks:
+				processUpdatePasswordTask(t)
 				break
 			case <-stopChannel:
 				return

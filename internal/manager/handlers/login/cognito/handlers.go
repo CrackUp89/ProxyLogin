@@ -185,14 +185,7 @@ func createRefreshToken() http.Handler {
 				return
 			}
 
-			taskResult := <-trc
-
-			if errors.Is(taskResult.Err, types.InvalidMFASoftwareTokenError) {
-				logTransportError(requestName, tools.HTTPWriteUnauthorized(w, fmt.Errorf("invalid mfa code")))
-				return
-			}
-
-			taskResponse(w, taskResult)
+			taskResponse(w, <-trc)
 		})
 }
 
@@ -216,16 +209,60 @@ func createLogOut() http.Handler {
 		})
 }
 
+func createSatisfyPasswordUpdateRequest() http.Handler {
+	requestName := "satisfy password update request"
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			value, ok := decodeAndValidate[satisfyPasswordUpdateRequest](w, r, requestName)
+			if !ok {
+				return
+			}
+			trc, err := AddSatisfyPasswordUpdateRequestTask(r.Context(), value.Session, value.User, value.Password, value.Attributes)
+
+			if err != nil {
+				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				return
+			}
+
+			taskResult := <-trc
+
+			taskResponse(w, taskResult)
+		})
+}
+
+func createUpdatePasswordRequest() http.Handler {
+	requestName := "update password"
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			value, ok := decodeAndValidate[updatePasswordRequest](w, r, requestName)
+			if !ok {
+				return
+			}
+			trc, err := AddUpdatePasswordTask(r.Context(), value.AccessToken, value.CurrentPassword, value.NewPassword)
+
+			if err != nil {
+				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				return
+			}
+
+			taskResult := <-trc
+
+			taskResponse(w, taskResult)
+		})
+}
+
 func defaultRequestSizeLimit(h http.Handler) http.Handler {
 	return tools.MaxRequestSizeLimiterMiddleware(h, 10*1024)
 }
 
 func AddRoutes(mux *http.ServeMux) *http.ServeMux {
 	mux.Handle("POST /v1/login", defaultRequestSizeLimit(createLogin()))
+	mux.Handle("POST /v1/login/up", defaultRequestSizeLimit(createSatisfyPasswordUpdateRequest()))
 	mux.Handle("POST /v1/mfasetup", defaultRequestSizeLimit(createMFASetup()))
 	mux.Handle("POST /v1/mfasetup/stverify", defaultRequestSizeLimit(createMFASetupVerifySoftwareToken()))
 	mux.Handle("POST /v1/stverify", defaultRequestSizeLimit(createMFASoftwareTokenVerify()))
 	mux.Handle("POST /v1/refresh", defaultRequestSizeLimit(createRefreshToken()))
 	mux.Handle("POST /v1/logout", defaultRequestSizeLimit(createLogOut()))
+	mux.Handle("POST /v1/up", defaultRequestSizeLimit(createUpdatePasswordRequest()))
 	return mux
 }

@@ -1,6 +1,10 @@
 package tools
 
-import "net/http"
+import (
+	"errors"
+	"net/http"
+	"proxylogin/internal/manager/handlers/login/types"
+)
 
 type ErrorResponse struct {
 	Code    int    `json:"code"`
@@ -13,13 +17,18 @@ func NewErrorResponse(code int, message string) ErrorResponse {
 
 func HTTPWriteBadRequest(w http.ResponseWriter, err error) error {
 	var msg string
+	code := -1
 	if err != nil {
 		msg = err.Error()
+		var v types.GenericError
+		if errors.As(err, &v) {
+			code = v.Code()
+		}
 	} else {
 		msg = "Bad Request"
 	}
 
-	return EncodeJSON(w, http.StatusBadRequest, NewErrorResponse(http.StatusBadRequest, msg))
+	return EncodeJSON(w, http.StatusBadRequest, NewErrorResponse(code, msg))
 }
 
 func HTTPWriteInternalServiceError(w http.ResponseWriter, err error) error {

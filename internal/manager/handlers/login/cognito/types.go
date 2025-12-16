@@ -125,3 +125,44 @@ func (r logOutRequest) Validate() types.ValidationIssues {
 	}
 	return errs
 }
+
+type satisfyPasswordUpdateRequest struct {
+	Session    string            `json:"session"`
+	User       string            `json:"user"`
+	Password   string            `json:"password"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
+func (r satisfyPasswordUpdateRequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.User) == 0 {
+		errs["user"] = "User is required"
+	}
+	if len(r.Password) == 0 {
+		errs["password"] = "Password is required"
+	}
+	if len(r.Session) == 0 {
+		errs["session"] = "Session is required"
+	}
+	return errs
+}
+
+type updatePasswordRequest struct {
+	AccessToken     string `json:"access_token"`
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+func (r updatePasswordRequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.AccessToken) == 0 {
+		errs["access_token"] = "access token is required"
+	}
+	if len(r.CurrentPassword) == 0 {
+		errs["current_password"] = "current password is required"
+	}
+	if len(r.NewPassword) == 0 {
+		errs["new_password"] = "new password is required"
+	}
+	return errs
+}
