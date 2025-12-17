@@ -320,13 +320,13 @@ func defaultRequestSizeLimit(h http.Handler) http.Handler {
 
 func AddRoutes(mux *http.ServeMux) *http.ServeMux {
 	mux.Handle("POST /v1/login", defaultRequestSizeLimit(createLogin()))
-	mux.Handle("POST /v1/login/up", defaultRequestSizeLimit(createSatisfyPasswordUpdateRequest()))
-	mux.Handle("POST /v1/mfasetup", defaultRequestSizeLimit(createMFASetup()))
-	mux.Handle("POST /v1/mfasetup/stverify", defaultRequestSizeLimit(createMFASetupVerifySoftwareToken()))
-	mux.Handle("POST /v1/stverify", defaultRequestSizeLimit(createMFASoftwareTokenVerify()))
+	mux.Handle("POST /v1/login/password/update", defaultRequestSizeLimit(createSatisfyPasswordUpdateRequest()))
+	mux.Handle("POST /v1/login/mfa/setup", defaultRequestSizeLimit(createMFASetup()))
+	mux.Handle("POST /v1/login/mfa/setup/verify", defaultRequestSizeLimit(createMFASetupVerifySoftwareToken()))
+	mux.Handle("POST /v1/login/mfa/verify", defaultRequestSizeLimit(createMFASoftwareTokenVerify()))
 	mux.Handle("POST /v1/refresh", defaultRequestSizeLimit(createRefreshToken()))
 	mux.Handle("POST /v1/logout", defaultRequestSizeLimit(createLogOut()))
-	mux.Handle("POST /v1/up", defaultRequestSizeLimit(createUpdatePasswordRequest()))
+	mux.Handle("POST /v1/password/update", defaultRequestSizeLimit(createUpdatePasswordRequest()))
 	mux.Handle("POST /v1/mfa/status", defaultRequestSizeLimit(createGetMFAStatus()))
 	mux.Handle("POST /v1/mfa/update", defaultRequestSizeLimit(createUpdateMFA()))
 	mux.Handle("POST /v1/mfa/update/verify", defaultRequestSizeLimit(createVerifyUpdateMFA()))
