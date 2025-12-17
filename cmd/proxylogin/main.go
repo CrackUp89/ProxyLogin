@@ -104,6 +104,12 @@ func init() {
 	serveCmd.Flags().String("cognito-user-pool-id", "", "AWS Cognito User Pool ID")
 	bindViperFlag(serveCmd, "cognito-user-pool-id", "cognito_user_pool_id")
 
+	serveCmd.Flags().String("cognito-jwks-issuer", "", "AWS Cognito JWKS Issuer")
+	bindViperFlag(serveCmd, "cognito-jwks-issuer", "cognito_jwks_issuer")
+
+	serveCmd.Flags().String("cognito-jwks-signing-key-url", "", "AWS Cognito JWKS Signing Key URL")
+	bindViperFlag(serveCmd, "cognito-jwks-signing-key-url", "cognito_jwks_signing_key_url")
+
 	serveCmd.Flags().Bool("cors-enable", false, "Enable CORS")
 	bindViperFlag(serveCmd, "cors-enable", "CORS_ENABLE")
 
@@ -142,6 +148,12 @@ func serve(cmd *cobra.Command) error {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	err = cognito.SetJWKSDetails(viper.GetString("cognito_jwks_issuer"), viper.GetString("cognito_jwks_signing_key_url"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	cognito.SetUserPoolID(viper.GetString("cognito_user_pool_id"))
 
 	cognito.Initialize()

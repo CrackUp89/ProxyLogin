@@ -144,7 +144,7 @@ var satisfyPasswordUpdateRequestTasks = make(chan SatisfyPasswordUpdateRequestTa
 
 func AddSatisfyPasswordUpdateRequestTask(ctx context.Context, sessionKey string, user string, password string, attributes map[string]string) (TaskResultChan, error) {
 	if len(satisfyPasswordUpdateRequestTasks) >= maxSatisfyPasswordUpdateRequestTasks {
-		return nil, types.NewTooManyTasks("LogOutTask")
+		return nil, types.NewTooManyTasks("SatisfyPasswordUpdateRequestTask")
 	}
 	resultChan := make(TaskResultChan)
 	satisfyPasswordUpdateRequestTasks <- SatisfyPasswordUpdateRequestTask{user, password, attributes, Task{ctx, sessionKey, resultChan}}
@@ -158,15 +158,68 @@ type updatePasswordTask struct {
 	Task
 }
 
-var maxUpdatePasswordTask = 1000
+var maxUpdatePasswordTasks = 1000
 var updatePasswordTasks = make(chan updatePasswordTask)
 
 func AddUpdatePasswordTask(ctx context.Context, accessToken string, currentPassword string, newPassword string) (TaskResultChan, error) {
-	if len(updatePasswordTasks) >= maxUpdatePasswordTask {
-		return nil, types.NewTooManyTasks("LogOutTask")
+	if len(updatePasswordTasks) >= maxUpdatePasswordTasks {
+		return nil, types.NewTooManyTasks("UpdatePasswordTask")
 	}
 	resultChan := make(TaskResultChan)
 	updatePasswordTasks <- updatePasswordTask{accessToken, currentPassword, newPassword, Task{ctx, "", resultChan}}
+	return resultChan, nil
+}
+
+type getMFAStatusTask struct {
+	AccessToken string
+	Task
+}
+
+var maxGetMFAStatusTask = 1000
+var getMFAStatusTasks = make(chan getMFAStatusTask)
+
+func AddGetMFAStatusTask(ctx context.Context, accessToken string) (TaskResultChan, error) {
+	if len(getMFAStatusTasks) >= maxGetMFAStatusTask {
+		return nil, types.NewTooManyTasks("GetMFAStatusTask")
+	}
+	resultChan := make(TaskResultChan)
+	getMFAStatusTasks <- getMFAStatusTask{accessToken, Task{ctx, "", resultChan}}
+	return resultChan, nil
+}
+
+type updateMFATask struct {
+	AccessToken string
+	MFAType     types.MFASetupType
+	Task
+}
+
+var maxUpdateMFATasks = 1000
+var updateMFATasks = make(chan updateMFATask)
+
+func AddUpdateMFATask(ctx context.Context, sessionKey string, accessToken string, mfaType types.MFASetupType) (TaskResultChan, error) {
+	if len(updateMFATasks) >= maxUpdateMFATasks {
+		return nil, types.NewTooManyTasks("UpdateMFATask")
+	}
+	resultChan := make(TaskResultChan)
+	updateMFATasks <- updateMFATask{accessToken, mfaType, Task{ctx, sessionKey, resultChan}}
+	return resultChan, nil
+}
+
+type verifyMFAUpdateTask struct {
+	AccessToken string
+	Code        string
+	Task
+}
+
+var maxVerifyMFAUpdateTasks = 1000
+var verifyMFAUpdateTasks = make(chan verifyMFAUpdateTask)
+
+func AddVerifyMFAUpdateTask(ctx context.Context, sessionKey string, accessToken string, code string) (TaskResultChan, error) {
+	if len(verifyMFAUpdateTasks) >= maxVerifyMFAUpdateTasks {
+		return nil, types.NewTooManyTasks("VerifyUpdateMFATask")
+	}
+	resultChan := make(TaskResultChan)
+	verifyMFAUpdateTasks <- verifyMFAUpdateTask{accessToken, code, Task{ctx, sessionKey, resultChan}}
 	return resultChan, nil
 }
 
@@ -198,6 +251,15 @@ func startWorker() chan bool {
 				break
 			case t := <-updatePasswordTasks:
 				processUpdatePasswordTask(t)
+				break
+			case t := <-getMFAStatusTasks:
+				processGetMFAStatusTask(t)
+				break
+			case t := <-updateMFATasks:
+				processUpdateMFATask(t)
+				break
+			case t := <-verifyMFAUpdateTasks:
+				processVerifyUpdateMFATask(t)
 				break
 			case <-stopChannel:
 				return

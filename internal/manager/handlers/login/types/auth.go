@@ -12,6 +12,28 @@ type GenericError interface {
 	Code() int
 }
 
+type InternalError struct {
+	privateMessage string
+	message        string
+	originalError  error
+}
+
+func (e *InternalError) Code() int {
+	return 1000
+}
+
+func (e *InternalError) Error() string {
+	return e.message
+}
+
+func (e *InternalError) PrivateError() string {
+	return e.privateMessage
+}
+
+func NewInternalError(privateMessage string, publicMessage string, originalError error) *InternalError {
+	return &InternalError{privateMessage, publicMessage, originalError}
+}
+
 type GenericAuthenticationError struct {
 	privateMessage string
 	message        string

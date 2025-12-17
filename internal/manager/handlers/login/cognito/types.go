@@ -166,3 +166,51 @@ func (r updatePasswordRequest) Validate() types.ValidationIssues {
 	}
 	return errs
 }
+
+type getMFAStatusRequest struct {
+	AccessToken string `json:"access_token"`
+}
+
+func (r getMFAStatusRequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.AccessToken) == 0 {
+		errs["access_token"] = "access token is required"
+	}
+	return errs
+}
+
+type updateMFARequest struct {
+	AccessToken string             `json:"access_token"`
+	MFAType     types.MFASetupType `json:"mfa_type"`
+}
+
+func (r updateMFARequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.AccessToken) == 0 {
+		errs["access_token"] = "access token is required"
+	}
+	if len(r.MFAType) == 0 {
+		errs["mfa_type"] = "mfa type is required"
+	}
+	return errs
+}
+
+type verifyMFAUpdateRequest struct {
+	Session     string `json:"session"`
+	AccessToken string `json:"access_token"`
+	Code        string `json:"code"`
+}
+
+func (r verifyMFAUpdateRequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.AccessToken) == 0 {
+		errs["access_token"] = "access token is required"
+	}
+	if len(r.Session) == 0 {
+		errs["password"] = "Session is required"
+	}
+	if len(r.Code) == 0 {
+		errs["code"] = "Code is required"
+	}
+	return errs
+}

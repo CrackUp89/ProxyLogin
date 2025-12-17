@@ -251,6 +251,69 @@ func createUpdatePasswordRequest() http.Handler {
 		})
 }
 
+func createGetMFAStatus() http.Handler {
+	requestName := "get MFA status"
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			value, ok := decodeAndValidate[getMFAStatusRequest](w, r, requestName)
+			if !ok {
+				return
+			}
+			trc, err := AddGetMFAStatusTask(r.Context(), value.AccessToken)
+
+			if err != nil {
+				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				return
+			}
+
+			taskResult := <-trc
+
+			taskResponse(w, taskResult)
+		})
+}
+
+func createUpdateMFA() http.Handler {
+	requestName := "update MFA"
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			value, ok := decodeAndValidate[updateMFARequest](w, r, requestName)
+			if !ok {
+				return
+			}
+			trc, err := AddUpdateMFATask(r.Context(), newSessionKey(), value.AccessToken, value.MFAType)
+
+			if err != nil {
+				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				return
+			}
+
+			taskResult := <-trc
+
+			taskResponse(w, taskResult)
+		})
+}
+
+func createVerifyUpdateMFA() http.Handler {
+	requestName := "verify MFA update"
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			value, ok := decodeAndValidate[verifyMFAUpdateRequest](w, r, requestName)
+			if !ok {
+				return
+			}
+			trc, err := AddVerifyMFAUpdateTask(r.Context(), value.Session, value.AccessToken, value.Code)
+
+			if err != nil {
+				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				return
+			}
+
+			taskResult := <-trc
+
+			taskResponse(w, taskResult)
+		})
+}
+
 func defaultRequestSizeLimit(h http.Handler) http.Handler {
 	return tools.MaxRequestSizeLimiterMiddleware(h, 10*1024)
 }
@@ -264,5 +327,8 @@ func AddRoutes(mux *http.ServeMux) *http.ServeMux {
 	mux.Handle("POST /v1/refresh", defaultRequestSizeLimit(createRefreshToken()))
 	mux.Handle("POST /v1/logout", defaultRequestSizeLimit(createLogOut()))
 	mux.Handle("POST /v1/up", defaultRequestSizeLimit(createUpdatePasswordRequest()))
+	mux.Handle("POST /v1/mfa/status", defaultRequestSizeLimit(createGetMFAStatus()))
+	mux.Handle("POST /v1/mfa/update", defaultRequestSizeLimit(createUpdateMFA()))
+	mux.Handle("POST /v1/mfa/update/verify", defaultRequestSizeLimit(createVerifyUpdateMFA()))
 	return mux
 }

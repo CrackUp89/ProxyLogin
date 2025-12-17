@@ -17,22 +17,27 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider/types"
+	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
 )
 
 var (
-	cognitoClientID     = ""
-	cognitoClientSecret = ""
-	cognitoUserPoolID   = ""
-	useAuthToRefresh    bool
-	awsConfig           aws.Config
-	client              *cognitoidentityprovider.Client
-	poolDescription     *cognitoidentityprovider.DescribeUserPoolClientOutput
+	cognitoClientID          = ""
+	cognitoClientSecret      = ""
+	cognitoUserPoolID        = ""
+	cognitoJWKSIssuer        = ""
+	cognitoJWKSKeySigningURL = ""
+	jwksValidator            *tools.JWKSValidator
+	useAuthToRefresh         bool
+	awsConfig                aws.Config
+	client                   *cognitoidentityprovider.Client
+	poolClientDescription    *types.UserPoolClientType
+	poolDescription          *types.UserPoolType
 )
 
 var sessionMutexManager = tools.NamedMutexManager{}
 
-func SetClientDetails(clientID string, clientSecret string) error {
+func SetClientDetails(clientID, clientSecret string) error {
 	if clientID == "" {
 		return errors.New("clientID is empty")
 	}
@@ -43,21 +48,53 @@ func SetClientDetails(clientID string, clientSecret string) error {
 	return nil
 }
 
+func SetJWKSDetails(jwksIssuer, jwksKeySigningURL string) error {
+	if jwksIssuer == "" {
+		return errors.New("jwksIssuer is empty")
+	}
+	if jwksKeySigningURL == "" {
+		return errors.New("jwksKeySigningURL is empty")
+	}
+
+	cognitoJWKSIssuer = jwksIssuer
+	cognitoJWKSKeySigningURL = jwksKeySigningURL
+
+	var err error
+	jwksValidator, err = tools.NewJWKSValidator(cognitoJWKSKeySigningURL, cognitoJWKSIssuer, "")
+
+	return err
+}
+
 func SetUserPoolID(userPoolID string) {
 	cognitoUserPoolID = userPoolID
 }
 
-func describeUserPool(client *cognitoidentityprovider.Client, userPoolId, clientId string) *cognitoidentityprovider.DescribeUserPoolClientOutput {
+func describeUserPoolClient(client *cognitoidentityprovider.Client, userPoolId, clientId string) *types.UserPoolClientType {
 	input := &cognitoidentityprovider.DescribeUserPoolClientInput{
 		UserPoolId: aws.String(userPoolId),
 		ClientId:   aws.String(clientId),
 	}
 
 	result, err := client.DescribeUserPoolClient(context.Background(), input)
+
 	if err != nil {
 		logger.Fatal("Failed to describe user pool", zap.Error(err))
 	}
-	return result
+	return result.UserPoolClient
+}
+
+func describeUserPool(client *cognitoidentityprovider.Client, userPoolId string) *types.UserPoolType {
+	input := &cognitoidentityprovider.DescribeUserPoolInput{
+		UserPoolId: aws.String(userPoolId),
+	}
+
+	result, err := client.DescribeUserPool(context.Background(), input)
+
+	if err != nil {
+		logger.Fatal("Failed to describe user pool", zap.Error(err))
+	}
+
+	return result.UserPool
 }
 
 func Initialize() {
@@ -68,12 +105,13 @@ func Initialize() {
 	}
 	client = cognitoidentityprovider.NewFromConfig(awsConfig)
 
-	poolDescription = describeUserPool(client, cognitoUserPoolID, cognitoClientID)
+	poolClientDescription = describeUserPoolClient(client, cognitoUserPoolID, cognitoClientID)
+	poolDescription = describeUserPool(client, cognitoUserPoolID)
 
-	useAuthToRefresh = poolDescription.UserPoolClient.EnableTokenRevocation != nil && *poolDescription.UserPoolClient.EnableTokenRevocation
+	useAuthToRefresh = poolClientDescription.EnableTokenRevocation != nil && *poolClientDescription.EnableTokenRevocation
 
-	if poolDescription.UserPoolClient.AuthSessionValidity != nil {
-		sessionValidFor = float64(*poolDescription.UserPoolClient.AuthSessionValidity*60) * 1.0
+	if poolClientDescription.AuthSessionValidity != nil {
+		sessionValidFor = float64(*poolClientDescription.AuthSessionValidity*60) * 1.0
 	}
 }
 
@@ -619,4 +657,205 @@ func processUpdatePasswordTask(task updatePasswordTask) {
 	}
 
 	task.ResultChan <- TaskResult{}
+}
+
+func processGetMFAStatusTask(task getMFAStatusTask) {
+	if !checkTaskContext(task.Task) {
+		return
+	}
+
+	token, err := jwksValidator.ValidateToken(task.AccessToken)
+
+	var username string
+
+	if err != nil {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Invalid token", err),
+		}
+		return
+	}
+
+	if claims, ok := token.Claims.(jwt.MapClaims); token.Valid && ok {
+		if un, ok := claims["username"].(string); ok {
+			username = un
+		}
+	} else {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewGenericAuthenticationError("token is invalid or does not contain username", "Invalid token", nil),
+		}
+		return
+	}
+
+	input := &cognitoidentityprovider.AdminGetUserInput{
+		UserPoolId: aws.String(cognitoUserPoolID),
+		Username:   aws.String(username),
+	}
+
+	result, err := client.AdminGetUser(context.TODO(), input)
+
+	if err != nil {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Logout error", err),
+		}
+		return
+	}
+
+	status := &loginTypes.MFAStatus{
+		MFAMethods: []string{},
+	}
+
+	if result.UserMFASettingList != nil {
+		status.MFAEnabled = len(result.UserMFASettingList) > 0
+		for _, mfa := range result.UserMFASettingList {
+			status.MFAMethods = append(status.MFAMethods, mfa)
+
+			if mfa == "EMAIL_OTP" {
+				status.EMAILConfigured = true
+			}
+
+			if mfa == "SOFTWARE_TOKEN_MFA" {
+				status.TOTPConfigured = true
+			}
+
+			if mfa == "SMS_MFA" {
+				status.SMSConfigured = true
+			}
+		}
+	} else {
+		if poolDescription.MfaConfiguration == types.UserPoolMfaTypeOn {
+			status.MFAEnabled = true
+		}
+	}
+
+	if result.PreferredMfaSetting != nil {
+		status.PreferredMFA = *result.PreferredMfaSetting
+	}
+
+	for _, attr := range result.UserAttributes {
+		switch *attr.Name {
+		case "phone_number":
+			status.HasPhoneNumber = true
+			status.PhoneNumber = *attr.Value
+		case "phone_number_verified":
+			status.PhoneVerified = *attr.Value == "true"
+		}
+	}
+
+	task.ResultChan <- TaskResult{
+		Payload: status,
+	}
+}
+
+func updateSoftwareToken(task updateMFATask) {
+	softwareTokenSettings := &types.SoftwareTokenMfaSettingsType{
+		Enabled:      false,
+		PreferredMfa: false,
+	}
+
+	input := &cognitoidentityprovider.SetUserMFAPreferenceInput{
+		AccessToken:              aws.String(task.AccessToken),
+		SoftwareTokenMfaSettings: softwareTokenSettings,
+	}
+
+	_, err := client.SetUserMFAPreference(task.Context, input)
+
+	if err != nil {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewInternalError(err.Error(), "Internal error", err),
+		}
+		return
+	}
+
+	associateInput := &cognitoidentityprovider.AssociateSoftwareTokenInput{
+		AccessToken: aws.String(task.AccessToken),
+	}
+
+	associateResult, err := client.AssociateSoftwareToken(context.TODO(), associateInput)
+	if err != nil {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewInternalError(err.Error(), "Internal error", err),
+		}
+		return
+	}
+
+	SetSession(task.SessionKey, "", NextStepMFASoftwareTokenSetupVerify, time.Now(), nil)
+	task.ResultChan <- TaskResult{
+		NextStep:   NextStepMFASoftwareTokenSetupVerify,
+		SessionKey: task.SessionKey,
+		Payload:    associateResult.SecretCode,
+	}
+}
+
+func processUpdateMFATask(task updateMFATask) {
+	if !checkTaskContext(task.Task) {
+		return
+	}
+
+	switch task.MFAType {
+	case loginTypes.MFASetupTypeSoftwareToken:
+		updateSoftwareToken(task)
+		return
+	default:
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewGenericAuthenticationError("MFA method not supported", "MFA method not supported", nil),
+		}
+		return
+	}
+
+}
+
+func verifySoftwareToken(task verifyMFAUpdateTask) {
+	input := &cognitoidentityprovider.VerifySoftwareTokenInput{
+		AccessToken: aws.String(task.AccessToken),
+		UserCode:    aws.String(task.Code),
+		//FriendlyDeviceName: aws.String("MyDevice"), // Optional device name
+	}
+
+	result, err := client.VerifySoftwareToken(task.Context, input)
+	if err != nil {
+		var est *types.EnableSoftwareTokenMFAException
+		if errors.As(err, &est) {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.InvalidMFASetupSoftwareTokenError,
+			}
+			return
+		}
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Authentication error", err),
+		}
+		return
+	}
+
+	if result.Status != types.VerifySoftwareTokenResponseTypeSuccess {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewGenericAuthenticationError("no error raised but response is not successful", "Authentication error", nil),
+		}
+		return
+	}
+
+	task.ResultChan <- TaskResult{}
+}
+
+func processVerifyUpdateMFATask(task verifyMFAUpdateTask) {
+	if !checkTaskContext(task.Task) {
+		return
+	}
+
+	var session LoginSession
+	if s, ok := getTaskSession(task.Task); !ok {
+		return
+	} else {
+		session = s
+	}
+
+	switch session.nextStep {
+	case NextStepMFASoftwareTokenSetupVerify:
+		verifySoftwareToken(task)
+	default:
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewGenericAuthenticationError("MFA method not supported", "Invalid input", nil),
+		}
+		return
+	}
+
 }
