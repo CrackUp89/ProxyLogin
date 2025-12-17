@@ -19,6 +19,6 @@ func createHealth() http.Handler {
 }
 
 func AddRoutes(mux *http.ServeMux) *http.ServeMux {
-	mux.Handle("GET /health", tools.MaxRequestSizeLimiterMiddleware(createHealth(), 1024))
+	mux.Handle("GET /v1/health", tools.MaxRequestSizeLimiterMiddleware(createHealth(), 1024))
 	return mux
 }
