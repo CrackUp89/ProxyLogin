@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"proxylogin/internal/manager/handlers/common"
 	"proxylogin/internal/manager/handlers/login/cognito"
+	"proxylogin/internal/manager/tools"
 	"strings"
 	"syscall"
 	"time"
@@ -168,6 +169,9 @@ func serve(cmd *cobra.Command) error {
 	if viper.GetBool("cors_enable") {
 		handler = corsMiddleware(handler)
 	}
+
+	handler = tools.WithAutoRecoverMiddleware(handler)
+	handler = tools.WithRequestMetadataContextMiddleware(handler)
 
 	httpServer := &http.Server{
 		Addr:    viper.GetString("address"),

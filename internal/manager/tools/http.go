@@ -1,10 +1,15 @@
 package tools
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"proxylogin/internal/manager/handlers/login/types"
+
+	"go.uber.org/zap"
 )
+
+var logger = NewLogger("HTTPTools")
 
 type ErrorResponse struct {
 	Code    int    `json:"code"`
@@ -73,4 +78,54 @@ func MaxRequestSizeLimiterMiddleware(next http.Handler, maxContentLength int64) 
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func WithAutoRecoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				logger.Error("handler panicked", zap.Any("panic", err), zap.Stack("stack"))
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+type RequestMetadata struct {
+	Host         string `json:"host"`
+	RequestURI   string `json:"uri"`
+	RemoteAddr   string `json:"remote_addr"`
+	RealIP       string `json:"real_ip"`
+	ForwardedFor string `json:"forwarded_for"`
+}
+
+func (receiver *RequestMetadata) GetZapFields() []zap.Field {
+	return []zap.Field{
+		zap.String("host", receiver.Host),
+		zap.String("uri", receiver.RequestURI),
+		zap.String("remote_addr", receiver.RemoteAddr),
+		zap.String("real_ip", receiver.RealIP),
+		zap.String("forwarded_for", receiver.ForwardedFor),
+	}
+}
+
+func WithRequestMetadataContextMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), "requestMetadata", RequestMetadata{
+			Host:         r.Host,
+			RequestURI:   r.RequestURI,
+			RemoteAddr:   r.RemoteAddr,
+			RealIP:       r.Header.Get("X-Real-IP"),
+			ForwardedFor: r.Header.Get("X-Forwarded-For"),
+		})
+
+		r = r.WithContext(ctx)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func GetRequestMetadataFromContext(ctx context.Context) (*RequestMetadata, bool) {
+	metadata, ok := ctx.Value("requestMetadata").(RequestMetadata)
+	return &metadata, ok
 }

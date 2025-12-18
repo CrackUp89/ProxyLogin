@@ -24,9 +24,14 @@ func logTransportError(requestName string, err error) {
 	}
 }
 
-func taskResponse(w http.ResponseWriter, result TaskResult) {
+func taskResponse(w http.ResponseWriter, result TaskResult, ctx context.Context) {
 	if result.Err != nil {
-		logger.Warn(result.Err.PrivateError(), zap.String("error", result.Err.Error()), zap.Int("code", result.Err.Code()))
+		zapFields := []zap.Field{zap.String("error", result.Err.Error()), zap.Int("code", result.Err.Code())}
+		requestMetadata, ok := tools.GetRequestMetadataFromContext(ctx)
+		if ok {
+			zapFields = append(zapFields, requestMetadata.GetZapFields()...)
+		}
+		logger.Warn(result.Err.PrivateError(), zapFields...)
 		logTransportError("task response", tools.HTTPWriteBadRequest(w, result.Err))
 		return
 	}
@@ -79,7 +84,7 @@ func createLogin() http.Handler {
 				return
 			}
 
-			taskResponse(w, taskResult)
+			taskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -102,7 +107,7 @@ func createMFASetup() http.Handler {
 				return
 			}
 
-			taskResponse(w, <-trc)
+			taskResponse(w, <-trc, r.Context())
 		})
 }
 
@@ -132,7 +137,7 @@ func createMFASetupVerifySoftwareToken() http.Handler {
 				return
 			}
 
-			taskResponse(w, taskResult)
+			taskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -162,7 +167,7 @@ func createMFASoftwareTokenVerify() http.Handler {
 				return
 			}
 
-			taskResponse(w, taskResult)
+			taskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -185,7 +190,7 @@ func createRefreshToken() http.Handler {
 				return
 			}
 
-			taskResponse(w, <-trc)
+			taskResponse(w, <-trc, r.Context())
 		})
 }
 
@@ -205,7 +210,7 @@ func createLogOut() http.Handler {
 				return
 			}
 
-			taskResponse(w, <-trc)
+			taskResponse(w, <-trc, r.Context())
 		})
 }
 
@@ -226,7 +231,7 @@ func createSatisfyPasswordUpdateRequest() http.Handler {
 
 			taskResult := <-trc
 
-			taskResponse(w, taskResult)
+			taskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -247,7 +252,7 @@ func createUpdatePasswordRequest() http.Handler {
 
 			taskResult := <-trc
 
-			taskResponse(w, taskResult)
+			taskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -259,7 +264,10 @@ func createGetMFAStatus() http.Handler {
 			if !ok {
 				return
 			}
-			trc, err := AddGetMFAStatusTask(r.Context(), value.AccessToken)
+
+			ctx := r.Context()
+
+			trc, err := AddGetMFAStatusTask(ctx, value.AccessToken)
 
 			if err != nil {
 				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
@@ -268,7 +276,7 @@ func createGetMFAStatus() http.Handler {
 
 			taskResult := <-trc
 
-			taskResponse(w, taskResult)
+			taskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -289,7 +297,7 @@ func createUpdateMFA() http.Handler {
 
 			taskResult := <-trc
 
-			taskResponse(w, taskResult)
+			taskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -310,7 +318,7 @@ func createVerifyUpdateMFA() http.Handler {
 
 			taskResult := <-trc
 
-			taskResponse(w, taskResult)
+			taskResponse(w, taskResult, r.Context())
 		})
 }
 
