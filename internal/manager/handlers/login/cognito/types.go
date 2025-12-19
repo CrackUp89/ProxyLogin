@@ -180,8 +180,8 @@ func (r getMFAStatusRequest) Validate() types.ValidationIssues {
 }
 
 type updateMFARequest struct {
-	AccessToken string             `json:"access_token"`
-	MFAType     types.MFASetupType `json:"mfa_type"`
+	AccessToken string        `json:"access_token"`
+	MFAType     types.MFAType `json:"mfa_type"`
 }
 
 func (r updateMFARequest) Validate() types.ValidationIssues {
@@ -207,10 +207,30 @@ func (r verifyMFAUpdateRequest) Validate() types.ValidationIssues {
 		errs["access_token"] = "access token is required"
 	}
 	if len(r.Session) == 0 {
-		errs["password"] = "Session is required"
+		errs["session"] = "Session is required"
 	}
 	if len(r.Code) == 0 {
 		errs["code"] = "Code is required"
+	}
+	return errs
+}
+
+type selectMFARequest struct {
+	Session string        `json:"session"`
+	User    string        `json:"user"`
+	MFAType types.MFAType `json:"mfa_type"`
+}
+
+func (r selectMFARequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.Session) == 0 {
+		errs["session"] = "Session is required"
+	}
+	if len(r.MFAType) == 0 {
+		errs["mfa_type"] = "MFAType is required"
+	}
+	if len(r.User) == 0 {
+		errs["user"] = "User is required"
 	}
 	return errs
 }

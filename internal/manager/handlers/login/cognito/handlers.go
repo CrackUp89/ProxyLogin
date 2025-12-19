@@ -100,7 +100,7 @@ func createMFASetup() http.Handler {
 				return
 			}
 
-			trc, err := AddMFASetupTask(ctx, value.Session, value.User, types.MFASetupType(value.MFAType))
+			trc, err := AddMFASetupTask(ctx, value.Session, value.User, types.MFAType(value.MFAType))
 
 			if err != nil {
 				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
@@ -141,8 +141,8 @@ func createMFASetupVerifySoftwareToken() http.Handler {
 		})
 }
 
-func createMFASoftwareTokenVerify() http.Handler {
-	requestName := "mfa verify software token"
+func createMFAVerify() http.Handler {
+	requestName := "mfa verify"
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
@@ -153,7 +153,7 @@ func createMFASoftwareTokenVerify() http.Handler {
 				return
 			}
 
-			trc, err := AddMFASoftwareTokenVerifyTask(ctx, value.Session, value.User, value.Code)
+			trc, err := AddMFAVerifyTask(ctx, value.Session, value.User, value.Code)
 
 			if err != nil {
 				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
@@ -162,7 +162,7 @@ func createMFASoftwareTokenVerify() http.Handler {
 
 			taskResult := <-trc
 
-			if errors.Is(taskResult.Err, types.InvalidMFASoftwareTokenError) {
+			if errors.Is(taskResult.Err, types.InvalidMFACodeError) {
 				logTransportError(requestName, tools.HTTPWriteUnauthorized(w, fmt.Errorf("invalid mfa code")))
 				return
 			}
@@ -322,6 +322,27 @@ func createVerifyUpdateMFA() http.Handler {
 		})
 }
 
+func createSelectMFA() http.Handler {
+	requestName := "select MFA"
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			value, ok := decodeAndValidate[selectMFARequest](w, r, requestName)
+			if !ok {
+				return
+			}
+			trc, err := AddSelectMFATask(r.Context(), value.Session, value.User, value.MFAType)
+
+			if err != nil {
+				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				return
+			}
+
+			taskResult := <-trc
+
+			taskResponse(w, taskResult, r.Context())
+		})
+}
+
 func defaultRequestSizeLimit(h http.Handler) http.Handler {
 	return tools.MaxRequestSizeLimiterMiddleware(h, 10*1024)
 }
@@ -329,9 +350,10 @@ func defaultRequestSizeLimit(h http.Handler) http.Handler {
 func AddRoutes(mux *http.ServeMux) *http.ServeMux {
 	mux.Handle("POST /v1/login", defaultRequestSizeLimit(createLogin()))
 	mux.Handle("POST /v1/login/password/update", defaultRequestSizeLimit(createSatisfyPasswordUpdateRequest()))
+	mux.Handle("POST /v1/login/mfa/select", defaultRequestSizeLimit(createSelectMFA()))
 	mux.Handle("POST /v1/login/mfa/setup", defaultRequestSizeLimit(createMFASetup()))
 	mux.Handle("POST /v1/login/mfa/setup/verify", defaultRequestSizeLimit(createMFASetupVerifySoftwareToken()))
-	mux.Handle("POST /v1/login/mfa/verify", defaultRequestSizeLimit(createMFASoftwareTokenVerify()))
+	mux.Handle("POST /v1/login/mfa/verify", defaultRequestSizeLimit(createMFAVerify()))
 	mux.Handle("POST /v1/refresh", defaultRequestSizeLimit(createRefreshToken()))
 	mux.Handle("POST /v1/logout", defaultRequestSizeLimit(createLogOut()))
 	mux.Handle("POST /v1/password/update", defaultRequestSizeLimit(createUpdatePasswordRequest()))

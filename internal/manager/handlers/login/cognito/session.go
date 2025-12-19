@@ -16,7 +16,10 @@ const (
 	NextStepNone                        NextStep = ""
 	NextStepMFASetup                    NextStep = "mfa_setup"
 	NextStepMFASoftwareTokenSetupVerify NextStep = "mfa_software_token_setup_verify"
+	NextStepMFASelect                   NextStep = "mfa_select"
 	NextStepMFASoftwareTokenVerify      NextStep = "mfa_software_token_verify"
+	NextStepMFAEMailVerify              NextStep = "mfa_email_verify"
+	NextStepMFASMSVerify                NextStep = "mfa_sms_verify"
 	NextStepNewPassword                 NextStep = "new_password"
 )
 
@@ -30,7 +33,8 @@ type LoginSession struct {
 var activeSessions = new(sync.Map)
 var sessionValidFor = 180.0
 
-func init() {
+func StartSessionCleanupRoutine() func() {
+	stop := make(chan bool, 1)
 	go func() {
 		cleanup := time.NewTicker(15 * time.Second)
 		for {
@@ -46,9 +50,15 @@ func init() {
 					}
 					return true
 				})
+			case <-stop:
+				sessionsLogger.Info("Session cleanup routine stopped")
+				return
 			}
 		}
 	}()
+	return func() {
+		stop <- true
+	}
 }
 
 func GetSession(loginSession string) (LoginSession, bool) {

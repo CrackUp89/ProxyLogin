@@ -160,6 +160,7 @@ func serve(cmd *cobra.Command) error {
 	cognito.Initialize()
 
 	stopCognitoWorkers := cognito.StartWorkers(viper.GetUint64("workers"))
+	stopSessionCleanup := cognito.StartSessionCleanupRoutine()
 
 	cognito.AddRoutes(mux)
 
@@ -172,6 +173,19 @@ func serve(cmd *cobra.Command) error {
 
 	handler = tools.WithAutoRecoverMiddleware(handler)
 	handler = tools.WithRequestMetadataContextMiddleware(handler)
+
+	//rt := tools.RequestTracker{}
+	//handler = rt.RequestTrackerMiddleware(handler)
+	//
+	//go func() {
+	//	for {
+	//		activeRequests := rt.GetActiveRequests()
+	//		for _, req := range activeRequests {
+	//			fmt.Println(req.Path)
+	//		}
+	//		time.Sleep(1 * time.Second)
+	//	}
+	//}()
 
 	httpServer := &http.Server{
 		Addr:    viper.GetString("address"),
@@ -196,6 +210,7 @@ func serve(cmd *cobra.Command) error {
 		log.Printf("Received signal: %v. Starting graceful shutdown...", sig)
 		log.Printf("Stoping workers...")
 		stopCognitoWorkers()
+		stopSessionCleanup()
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 

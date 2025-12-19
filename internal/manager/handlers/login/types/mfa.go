@@ -1,11 +1,11 @@
 package types
 
-type MFASetupType string
+type MFAType string
 
 const (
-	MFASetupTypeSoftwareToken MFASetupType = "software_token"
-	MFASetupTypeSMS           MFASetupType = "sms"
-	MFASetupTypeEMAIL         MFASetupType = "email"
+	MFATypeSoftwareToken MFAType = "software_token"
+	MFATypeSMS           MFAType = "sms"
+	MFATypeEMAIL         MFAType = "email"
 )
 
 type invalidMFASetupSoftwareTokenError struct{}
@@ -38,7 +38,7 @@ func (e invalidMFASoftwareTokenError) Error() string {
 	return "Invalid MFA Software Token"
 }
 
-var InvalidMFASoftwareTokenError = invalidMFASoftwareTokenError{}
+var InvalidMFACodeError = invalidMFASoftwareTokenError{}
 
 type MFAStatus struct {
 	MFAEnabled      bool     `json:"mfa_enabled"`

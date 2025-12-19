@@ -5,6 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"proxylogin/internal/manager/handlers/login/types"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -128,4 +131,41 @@ func WithRequestMetadataContextMiddleware(next http.Handler) http.Handler {
 func GetRequestMetadataFromContext(ctx context.Context) (*RequestMetadata, bool) {
 	metadata, ok := ctx.Value("requestMetadata").(RequestMetadata)
 	return &metadata, ok
+}
+
+type RequestInfo struct {
+	Method    string
+	Path      string
+	StartTime time.Time
+}
+
+type RequestTracker struct {
+	requests sync.Map
+	counter  int64
+}
+
+func (rt *RequestTracker) RequestTrackerMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := atomic.AddInt64(&rt.counter, 1)
+
+		info := RequestInfo{
+			Method:    r.Method,
+			Path:      r.URL.Path,
+			StartTime: time.Now(),
+		}
+
+		rt.requests.Store(id, info)
+		defer rt.requests.Delete(id)
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (rt *RequestTracker) GetActiveRequests() []RequestInfo {
+	var active []RequestInfo
+	rt.requests.Range(func(key, value interface{}) bool {
+		active = append(active, value.(RequestInfo))
+		return true
+	})
+	return active
 }
