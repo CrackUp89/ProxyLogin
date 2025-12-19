@@ -747,24 +747,24 @@ func processGetMFAStatusTask(task getMFAStatusTask) {
 }
 
 func updateSoftwareToken(task updateMFATask) {
-	softwareTokenSettings := &types.SoftwareTokenMfaSettingsType{
-		Enabled:      false,
-		PreferredMfa: false,
-	}
+	//softwareTokenSettings := &types.SoftwareTokenMfaSettingsType{
+	//	Enabled:      false,
+	//	PreferredMfa: false,
+	//}
 
-	input := &cognitoidentityprovider.SetUserMFAPreferenceInput{
-		AccessToken:              aws.String(task.AccessToken),
-		SoftwareTokenMfaSettings: softwareTokenSettings,
-	}
-
-	_, err := client.SetUserMFAPreference(task.Context, input)
-
-	if err != nil {
-		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewInternalError(err.Error(), "Internal error", err),
-		}
-		return
-	}
+	//input := &cognitoidentityprovider.SetUserMFAPreferenceInput{
+	//	AccessToken:              aws.String(task.AccessToken),
+	//	SoftwareTokenMfaSettings: softwareTokenSettings,
+	//}
+	//
+	//_, err := client.SetUserMFAPreference(task.Context, input)
+	//
+	//if err != nil {
+	//	task.ResultChan <- TaskResult{
+	//		Err: loginTypes.NewInternalError(err.Error(), "Internal error", err),
+	//	}
+	//	return
+	//}
 
 	associateInput := &cognitoidentityprovider.AssociateSoftwareTokenInput{
 		AccessToken: aws.String(task.AccessToken),
