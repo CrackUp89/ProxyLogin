@@ -19,7 +19,7 @@ type InternalError struct {
 }
 
 func (e *InternalError) Code() int {
-	return 1000
+	return 10000
 }
 
 func (e *InternalError) Error() string {
@@ -56,22 +56,22 @@ func NewGenericAuthenticationError(privateMessage string, publicMessage string, 
 	return &GenericAuthenticationError{privateMessage, publicMessage, originalError}
 }
 
-type SessionExpiredOrDoesNotExistError struct{}
+type LoginSessionExpiredOrDoesNotExistError struct{}
 
-func (s *SessionExpiredOrDoesNotExistError) Error() string {
+func (s *LoginSessionExpiredOrDoesNotExistError) Error() string {
 	return "Session expired or does not exist"
 }
 
-func (s *SessionExpiredOrDoesNotExistError) PrivateError() string {
+func (s *LoginSessionExpiredOrDoesNotExistError) PrivateError() string {
 	return "Session expired or does not exist"
 }
 
-func (s *SessionExpiredOrDoesNotExistError) Code() int {
+func (s *LoginSessionExpiredOrDoesNotExistError) Code() int {
 	return 1001
 }
 
-func NewSessionExpiredOrDoesNotExistError() *SessionExpiredOrDoesNotExistError {
-	return &SessionExpiredOrDoesNotExistError{}
+func NewLoginSessionExpiredOrDoesNotExistError() *LoginSessionExpiredOrDoesNotExistError {
+	return &LoginSessionExpiredOrDoesNotExistError{}
 }
 
 type invalidUserOrPasswordError struct{}

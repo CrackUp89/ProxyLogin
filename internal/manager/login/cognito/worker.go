@@ -49,6 +49,15 @@ func startWorker() chan bool {
 			case t := <-selectMFATasks:
 				processSelectMFATask(t)
 				break
+			case t := <-initiatePasswordResetTasks:
+				processInitiatePasswordResetTask(t)
+				break
+			case t := <-resetPasswordTasks:
+				processResetPasswordTask(t)
+				break
+			case t := <-finalizePasswordResetTasks:
+				processFinalizePasswordResetTask(t)
+				break
 			case <-stopChannel:
 				return
 			}

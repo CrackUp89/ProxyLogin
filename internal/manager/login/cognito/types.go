@@ -1,7 +1,7 @@
 package cognito
 
 import (
-	"proxylogin/internal/manager/handlers/login/types"
+	"proxylogin/internal/manager/login/types"
 )
 
 type RefreshMethod string
@@ -231,6 +231,48 @@ func (r selectMFARequest) Validate() types.ValidationIssues {
 	}
 	if len(r.User) == 0 {
 		errs["user"] = "User is required"
+	}
+	return errs
+}
+
+type initiatePasswordResetRequest struct {
+	Email string `json:"email"`
+}
+
+func (r initiatePasswordResetRequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.Email) == 0 {
+		errs["email"] = "Email is required"
+	}
+	return errs
+}
+
+type passwordResetToken string
+
+func (r passwordResetToken) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r) == 0 {
+		errs["token"] = "token is required"
+	}
+	return errs
+}
+
+type finalizePasswordResetRequest struct {
+	User     string `json:"user"`
+	Code     string `json:"code"`
+	Password string `json:"password"`
+}
+
+func (r finalizePasswordResetRequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.User) == 0 {
+		errs["user"] = "required"
+	}
+	if len(r.Code) == 0 {
+		errs["code"] = "required"
+	}
+	if len(r.Password) == 0 {
+		errs["password"] = "required"
 	}
 	return errs
 }

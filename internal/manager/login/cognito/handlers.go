@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"proxylogin/internal/manager/handlers/login/types"
+	"proxylogin/internal/manager/login/types"
 	"proxylogin/internal/manager/tools"
 	"time"
 
@@ -24,7 +24,7 @@ func logTransportError(requestName string, err error) {
 	}
 }
 
-func taskResponse(w http.ResponseWriter, result TaskResult, ctx context.Context) {
+func processTaskError(w http.ResponseWriter, result TaskResult, ctx context.Context) bool {
 	if result.Err != nil {
 		zapFields := []zap.Field{zap.String("error", result.Err.Error()), zap.Int("code", result.Err.Code())}
 		requestMetadata, ok := tools.GetRequestMetadataFromContext(ctx)
@@ -33,6 +33,14 @@ func taskResponse(w http.ResponseWriter, result TaskResult, ctx context.Context)
 		}
 		logger.Warn(result.Err.PrivateError(), zapFields...)
 		logTransportError("task response", tools.HTTPWriteBadRequest(w, result.Err))
+		return false
+	}
+
+	return true
+}
+
+func processTaskResponse(w http.ResponseWriter, result TaskResult, ctx context.Context) {
+	if !processTaskError(w, result, ctx) {
 		return
 	}
 
@@ -84,7 +92,7 @@ func createLogin() http.Handler {
 				return
 			}
 
-			taskResponse(w, taskResult, r.Context())
+			processTaskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -107,7 +115,7 @@ func createMFASetup() http.Handler {
 				return
 			}
 
-			taskResponse(w, <-trc, r.Context())
+			processTaskResponse(w, <-trc, r.Context())
 		})
 }
 
@@ -137,7 +145,7 @@ func createMFASetupVerifySoftwareToken() http.Handler {
 				return
 			}
 
-			taskResponse(w, taskResult, r.Context())
+			processTaskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -167,7 +175,7 @@ func createMFAVerify() http.Handler {
 				return
 			}
 
-			taskResponse(w, taskResult, r.Context())
+			processTaskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -190,7 +198,7 @@ func createRefreshToken() http.Handler {
 				return
 			}
 
-			taskResponse(w, <-trc, r.Context())
+			processTaskResponse(w, <-trc, r.Context())
 		})
 }
 
@@ -210,7 +218,7 @@ func createLogOut() http.Handler {
 				return
 			}
 
-			taskResponse(w, <-trc, r.Context())
+			processTaskResponse(w, <-trc, r.Context())
 		})
 }
 
@@ -231,7 +239,7 @@ func createSatisfyPasswordUpdateRequest() http.Handler {
 
 			taskResult := <-trc
 
-			taskResponse(w, taskResult, r.Context())
+			processTaskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -252,7 +260,7 @@ func createUpdatePasswordRequest() http.Handler {
 
 			taskResult := <-trc
 
-			taskResponse(w, taskResult, r.Context())
+			processTaskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -276,7 +284,7 @@ func createGetMFAStatus() http.Handler {
 
 			taskResult := <-trc
 
-			taskResponse(w, taskResult, r.Context())
+			processTaskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -297,7 +305,7 @@ func createUpdateMFA() http.Handler {
 
 			taskResult := <-trc
 
-			taskResponse(w, taskResult, r.Context())
+			processTaskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -318,7 +326,7 @@ func createVerifyUpdateMFA() http.Handler {
 
 			taskResult := <-trc
 
-			taskResponse(w, taskResult, r.Context())
+			processTaskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -339,7 +347,77 @@ func createSelectMFA() http.Handler {
 
 			taskResult := <-trc
 
-			taskResponse(w, taskResult, r.Context())
+			processTaskResponse(w, taskResult, r.Context())
+		})
+}
+
+func createInitiatePasswordResetRequest() http.Handler {
+	requestName := "initiate password reset request"
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			value, ok := decodeAndValidate[initiatePasswordResetRequest](w, r, requestName)
+			if !ok {
+				return
+			}
+			trc, err := AddInitiatePasswordResetTask(r.Context(), value.Email)
+
+			if err != nil {
+				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				return
+			}
+
+			taskResult := <-trc
+
+			processTaskResponse(w, taskResult, r.Context())
+		})
+}
+
+func createResetPasswordRequest() http.Handler {
+	requestName := "reset password request"
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			token := passwordResetToken(r.URL.Query().Get("token"))
+
+			if issues := token.Validate(); len(issues) > 0 {
+				logTransportError(requestName, tools.HTTPWriteBadRequest(w, types.NewValidationError(issues)))
+				return
+			}
+
+			trc, err := AddResetPasswordTask(r.Context(), string(token))
+
+			if err != nil {
+				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				return
+			}
+
+			taskResult := <-trc
+			if !processTaskError(w, taskResult, r.Context()) {
+				return
+			}
+
+			w.Header().Add("Location", taskResult.Payload.(string))
+			w.WriteHeader(http.StatusFound)
+		})
+}
+
+func createFinalizePasswordResetRequest() http.Handler {
+	requestName := "initiate password reset request"
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			value, ok := decodeAndValidate[finalizePasswordResetRequest](w, r, requestName)
+			if !ok {
+				return
+			}
+			trc, err := AddFinalizePasswordResetTask(r.Context(), value.User, value.Code, value.Password)
+
+			if err != nil {
+				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				return
+			}
+
+			taskResult := <-trc
+
+			processTaskResponse(w, taskResult, r.Context())
 		})
 }
 
@@ -357,6 +435,9 @@ func AddRoutes(mux *http.ServeMux) *http.ServeMux {
 	mux.Handle("POST /v1/refresh", defaultRequestSizeLimit(createRefreshToken()))
 	mux.Handle("POST /v1/logout", defaultRequestSizeLimit(createLogOut()))
 	mux.Handle("POST /v1/password/update", defaultRequestSizeLimit(createUpdatePasswordRequest()))
+	mux.Handle("POST /v1/password/forgot", defaultRequestSizeLimit(createInitiatePasswordResetRequest()))
+	mux.Handle("GET /v1/password/reset", defaultRequestSizeLimit(createResetPasswordRequest()))
+	mux.Handle("POST /v1/password/reset/finalize", defaultRequestSizeLimit(createFinalizePasswordResetRequest()))
 	mux.Handle("POST /v1/mfa/status", defaultRequestSizeLimit(createGetMFAStatus()))
 	mux.Handle("POST /v1/mfa/update", defaultRequestSizeLimit(createUpdateMFA()))
 	mux.Handle("POST /v1/mfa/update/verify", defaultRequestSizeLimit(createVerifyUpdateMFA()))

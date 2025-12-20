@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"proxylogin/internal/manager/handlers/login/types"
+	"proxylogin/internal/manager/login/types"
 	"sync"
 	"sync/atomic"
 	"time"
