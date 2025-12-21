@@ -58,7 +58,9 @@ func loadSettings() error {
 		loginSessionValidFor = time.Duration(*poolClientDescription.AuthSessionValidity*60) * time.Second
 	}
 
-	return nil
+	jwksValidator, err = tools.NewJWKSValidator(cognitoJWKSKeySigningURL, cognitoJWKSIssuer, "")
+
+	return err
 }
 
 func validateSettings() error {
