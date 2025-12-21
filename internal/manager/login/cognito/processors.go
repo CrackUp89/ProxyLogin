@@ -18,7 +18,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
-	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider/types"
+	cognitoTypes "github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider/types"
 	"github.com/aws/aws-sdk-go-v2/service/ses"
 	sesTypes "github.com/aws/aws-sdk-go-v2/service/ses/types"
 	"github.com/golang-jwt/jwt/v5"
@@ -33,7 +33,7 @@ func computeSecretHash(clientSecret, username, clientId string) string {
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
 }
 
-func authResultToTokenSet(authResult *types.AuthenticationResultType) loginTypes.TokenSet {
+func authResultToTokenSet(authResult *cognitoTypes.AuthenticationResultType) loginTypes.TokenSet {
 	result := loginTypes.TokenSet{
 		AccessToken: *authResult.AccessToken,
 		IdToken:     *authResult.IdToken,
@@ -44,7 +44,7 @@ func authResultToTokenSet(authResult *types.AuthenticationResultType) loginTypes
 	return result
 }
 
-func handleChallenge(challenge types.ChallengeNameType, challengeParameters map[string]string, task Task, cognitoSessions string) {
+func handleChallenge(challenge cognitoTypes.ChallengeNameType, challengeParameters map[string]string, task Task, cognitoSessions string) {
 
 	if challenge == "" {
 		task.ResultChan <- TaskResult{
@@ -61,7 +61,7 @@ func handleChallenge(challenge types.ChallengeNameType, challengeParameters map[
 	var nextStep NextStep
 
 	switch challenge {
-	case types.ChallengeNameTypeSelectMfaType:
+	case cognitoTypes.ChallengeNameTypeSelectMfaType:
 		nextStep = NextStepMFASelect
 		v, ok := challengeParameters["MFAS_CAN_CHOOSE"]
 		if ok {
@@ -75,7 +75,7 @@ func handleChallenge(challenge types.ChallengeNameType, challengeParameters map[
 			return
 		}
 		break
-	case types.ChallengeNameTypeMfaSetup:
+	case cognitoTypes.ChallengeNameTypeMfaSetup:
 		nextStep = NextStepMFASetup
 		v, ok := challengeParameters["MFAS_CAN_SETUP"]
 		if ok {
@@ -89,16 +89,16 @@ func handleChallenge(challenge types.ChallengeNameType, challengeParameters map[
 			return
 		}
 		break
-	case types.ChallengeNameTypeSoftwareTokenMfa:
+	case cognitoTypes.ChallengeNameTypeSoftwareTokenMfa:
 		nextStep = NextStepMFASoftwareTokenVerify
 		break
-	case types.ChallengeNameTypeEmailOtp:
+	case cognitoTypes.ChallengeNameTypeEmailOtp:
 		nextStep = NextStepMFAEMailVerify
 		break
-	case types.ChallengeNameTypeSmsMfa:
+	case cognitoTypes.ChallengeNameTypeSmsMfa:
 		nextStep = NextStepMFAEMailVerify
 		break
-	case types.ChallengeNameTypeNewPasswordRequired:
+	case cognitoTypes.ChallengeNameTypeNewPasswordRequired:
 		nextStep = NextStepNewPassword
 		v, ok := challengeParameters["requiredAttributes"]
 		if ok {
@@ -179,7 +179,7 @@ func processLoginTask(task loginTask) {
 	logger.Debug("processLoginTask", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
 	authInput := &cognitoidentityprovider.InitiateAuthInput{
-		AuthFlow: types.AuthFlowTypeUserPasswordAuth,
+		AuthFlow: cognitoTypes.AuthFlowTypeUserPasswordAuth,
 		ClientId: aws.String(cognitoClientID),
 		AuthParameters: map[string]string{
 			"USERNAME": task.User,
@@ -194,8 +194,8 @@ func processLoginTask(task loginTask) {
 	result, err := cognitoClient.InitiateAuth(task.Context, authInput)
 
 	if err != nil {
-		var unf *types.UserNotFoundException
-		var ip *types.NotAuthorizedException
+		var unf *cognitoTypes.UserNotFoundException
+		var ip *cognitoTypes.NotAuthorizedException
 		if errors.As(err, &unf) || errors.As(err, &ip) {
 			task.ResultChan <- TaskResult{
 				Err: loginTypes.InvalidUserOrPasswordError,
@@ -298,7 +298,7 @@ func processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoftwareTokenTask
 
 	verifyResult, err := cognitoClient.VerifySoftwareToken(task.Context, verifyInput)
 	if err != nil {
-		var est *types.EnableSoftwareTokenMFAException
+		var est *cognitoTypes.EnableSoftwareTokenMFAException
 		if errors.As(err, &est) {
 			task.ResultChan <- TaskResult{
 				Err: loginTypes.InvalidMFASetupSoftwareTokenError,
@@ -311,7 +311,7 @@ func processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoftwareTokenTask
 		return
 	}
 
-	if verifyResult.Status != types.VerifySoftwareTokenResponseTypeSuccess {
+	if verifyResult.Status != cognitoTypes.VerifySoftwareTokenResponseTypeSuccess {
 		task.ResultChan <- TaskResult{
 			Err: loginTypes.NewGenericAuthenticationError("no error raised but response is not successful", "Authentication error", nil),
 		}
@@ -319,7 +319,7 @@ func processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoftwareTokenTask
 	}
 
 	challengeInput := &cognitoidentityprovider.RespondToAuthChallengeInput{
-		ChallengeName: types.ChallengeNameTypeMfaSetup,
+		ChallengeName: cognitoTypes.ChallengeNameTypeMfaSetup,
 		ClientId:      aws.String(cognitoClientID),
 		Session:       verifyResult.Session,
 		ChallengeResponses: map[string]string{
@@ -364,15 +364,15 @@ func verifyMFACode(session LoginSession, task mfaVerifyTask, step NextStep) {
 
 	switch step {
 	case NextStepMFASoftwareTokenVerify:
-		challengeResp.ChallengeName = types.ChallengeNameTypeSoftwareTokenMfa
+		challengeResp.ChallengeName = cognitoTypes.ChallengeNameTypeSoftwareTokenMfa
 		challengeResp.ChallengeResponses["SOFTWARE_TOKEN_MFA_CODE"] = task.Code
 		break
 	case NextStepMFAEMailVerify:
-		challengeResp.ChallengeName = types.ChallengeNameTypeEmailOtp
+		challengeResp.ChallengeName = cognitoTypes.ChallengeNameTypeEmailOtp
 		challengeResp.ChallengeResponses["EMAIL_OTP_CODE"] = task.Code
 		break
 	case NextStepMFASMSVerify:
-		challengeResp.ChallengeName = types.ChallengeNameTypeSmsMfa
+		challengeResp.ChallengeName = cognitoTypes.ChallengeNameTypeSmsMfa
 		challengeResp.ChallengeResponses["SMS_OTP_CODE"] = task.Code
 		break
 	}
@@ -440,11 +440,11 @@ func processRefreshTokenTask(task refreshTokenTask) {
 	}
 
 	var err error
-	var authResult *types.AuthenticationResultType
+	var authResult *cognitoTypes.AuthenticationResultType
 
 	if useAuthToRefresh {
 		input := &cognitoidentityprovider.InitiateAuthInput{
-			AuthFlow: types.AuthFlowTypeRefreshTokenAuth,
+			AuthFlow: cognitoTypes.AuthFlowTypeRefreshTokenAuth,
 			ClientId: aws.String(cognitoClientID),
 			AuthParameters: map[string]string{
 				"REFRESH_TOKEN": task.RefreshToken,
@@ -515,7 +515,7 @@ func processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUpdateRequestTa
 	}
 
 	input := &cognitoidentityprovider.RespondToAuthChallengeInput{
-		ChallengeName: types.ChallengeNameTypeNewPasswordRequired,
+		ChallengeName: cognitoTypes.ChallengeNameTypeNewPasswordRequired,
 		ClientId:      aws.String(cognitoClientID),
 		Session:       aws.String(session.cognitoSession),
 		ChallengeResponses: map[string]string{
@@ -530,7 +530,7 @@ func processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUpdateRequestTa
 
 	result, err := cognitoClient.RespondToAuthChallenge(task.Context, input)
 	if err != nil {
-		var pv *types.PasswordHistoryPolicyViolationException
+		var pv *cognitoTypes.PasswordHistoryPolicyViolationException
 		if errors.As(err, &pv) {
 			task.ResultChan <- TaskResult{
 				Err: loginTypes.PasswordHistoryError,
@@ -538,7 +538,7 @@ func processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUpdateRequestTa
 			return
 		}
 
-		var ip *types.InvalidPasswordException
+		var ip *cognitoTypes.InvalidPasswordException
 		if errors.As(err, &ip) {
 			task.ResultChan <- TaskResult{
 				Err: loginTypes.InvalidNewPasswordError,
@@ -681,7 +681,7 @@ func processGetMFAStatusTask(task getMFAStatusTask) {
 			}
 		}
 	} else {
-		if poolDescription.MfaConfiguration == types.UserPoolMfaTypeOn {
+		if poolDescription.MfaConfiguration == cognitoTypes.UserPoolMfaTypeOn {
 			status.MFAEnabled = true
 		}
 	}
@@ -706,7 +706,7 @@ func processGetMFAStatusTask(task getMFAStatusTask) {
 }
 
 func updateSoftwareToken(task updateMFATask) {
-	//softwareTokenSettings := &types.SoftwareTokenMfaSettingsType{
+	//softwareTokenSettings := &cognitoTypes.SoftwareTokenMfaSettingsType{
 	//	Enabled:      false,
 	//	PreferredMfa: false,
 	//}
@@ -772,7 +772,7 @@ func verifyMFASetupSoftwareToken(task verifyMFAUpdateTask) {
 
 	result, err := cognitoClient.VerifySoftwareToken(task.Context, input)
 	if err != nil {
-		var est *types.EnableSoftwareTokenMFAException
+		var est *cognitoTypes.EnableSoftwareTokenMFAException
 		if errors.As(err, &est) {
 			task.ResultChan <- TaskResult{
 				Err: loginTypes.InvalidMFASetupSoftwareTokenError,
@@ -785,7 +785,7 @@ func verifyMFASetupSoftwareToken(task verifyMFAUpdateTask) {
 		return
 	}
 
-	if result.Status != types.VerifySoftwareTokenResponseTypeSuccess {
+	if result.Status != cognitoTypes.VerifySoftwareTokenResponseTypeSuccess {
 		task.ResultChan <- TaskResult{
 			Err: loginTypes.NewGenericAuthenticationError("no error raised but response is not successful", "Authentication error", nil),
 		}
@@ -844,7 +844,7 @@ func processSelectMFATask(task selectMFATask) {
 	}
 
 	input := &cognitoidentityprovider.RespondToAuthChallengeInput{
-		ChallengeName: types.ChallengeNameTypeSelectMfaType,
+		ChallengeName: cognitoTypes.ChallengeNameTypeSelectMfaType,
 		ClientId:      aws.String(cognitoClientID),
 		Session:       aws.String(session.cognitoSession),
 		ChallengeResponses: map[string]string{
@@ -868,7 +868,7 @@ func processSelectMFATask(task selectMFATask) {
 	handleChallenge(result.ChallengeName, result.ChallengeParameters, task.Task, *result.Session)
 }
 
-func findUsersByEmail(ctx context.Context, email string) ([]types.UserType, loginTypes.GenericError) {
+func findUsersByEmail(ctx context.Context, email string) ([]cognitoTypes.UserType, loginTypes.GenericError) {
 	filter := fmt.Sprintf("email = \"%s\"", email)
 
 	input := &cognitoidentityprovider.ListUsersInput{
@@ -1037,6 +1037,10 @@ func processFinalizePasswordResetTask(task finalizePasswordResetTask) {
 		}
 		return
 	}
+
+	logger.Info("user finalized password reset",
+		zap.String("user", task.User),
+	)
 
 	task.ResultChan <- TaskResult{}
 }

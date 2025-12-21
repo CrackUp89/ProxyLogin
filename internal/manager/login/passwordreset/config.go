@@ -7,6 +7,7 @@ import (
 )
 
 type Settings struct {
+	Enabled      bool
 	Company      string
 	Year         int
 	Sender       string
@@ -18,6 +19,7 @@ type Settings struct {
 var settings Settings
 
 func init() {
+	viper.SetDefault("password.reset.enabled", true)
 	viper.SetDefault("password.reset.company", "TotallyNotEvilCompanyName")
 	viper.SetDefault("password.reset.year", time.Now().Year())
 	viper.SetDefault("password.reset.tokenValidFor", 60)
@@ -29,6 +31,7 @@ func init() {
 
 func LoadConfig() {
 	settings = Settings{
+		Enabled:      viper.GetBool("password.reset.enabled"),
 		Company:      viper.GetString("password.reset.company"),
 		Year:         viper.GetInt("password.reset.year"),
 		Sender:       viper.GetString("password.reset.sender"),

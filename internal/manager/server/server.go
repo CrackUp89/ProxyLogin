@@ -50,7 +50,7 @@ func Run() error {
 	var handler http.Handler
 	handler = mux
 
-	if viper.GetBool("http.corsEnabled") {
+	if viper.GetBool("http.cors.enabled") {
 		handler = withCORSMiddleware(handler)
 	}
 
