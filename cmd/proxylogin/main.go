@@ -72,9 +72,8 @@ func loadEnvFile() {
 	v.SetConfigType("env")
 
 	if err = v.ReadInConfig(); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			logger.Info("Config file does not exist")
-		} else {
+		var nf viper.ConfigFileNotFoundError
+		if !errors.As(err, &nf) {
 			logger.Error(err.Error())
 		}
 	}
