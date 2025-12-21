@@ -71,7 +71,7 @@ func Run() error {
 	//}()
 
 	httpServer := &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", viper.GetString("http.address"), viper.GetInt("http.port")),
+		Addr:    fmt.Sprintf("%s:%s", viper.GetString("http.address"), viper.GetString("http.port")),
 		Handler: handler,
 	}
 
