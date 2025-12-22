@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"proxylogin/internal/manager/config"
 	"proxylogin/internal/manager/login/passwordreset"
 	loginTypes "proxylogin/internal/manager/login/types"
@@ -22,8 +21,22 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ses"
 	sesTypes "github.com/aws/aws-sdk-go-v2/service/ses/types"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
+
+var processingLogLevel = zapcore.InfoLevel
+
+func init() {
+	viper.SetDefault("cognito.logAllRequests", true)
+}
+
+func loadProcessingSettings() {
+	if !viper.GetBool("cognito.logAllRequests") {
+		processingLogLevel = zapcore.DebugLevel
+	}
+}
 
 func computeSecretHash(clientSecret, username, clientId string) string {
 	message := username + clientId
@@ -182,7 +195,7 @@ func processLoginTask(task loginTask) {
 	unlockSession := lockLoginSession(task.SessionKey)
 	defer unlockSession()
 
-	requestLogger.Debug("processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
+	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
 	authInput := &cognitoidentityprovider.InitiateAuthInput{
 		AuthFlow: cognitoTypes.AuthFlowTypeUserPasswordAuth,
@@ -242,7 +255,7 @@ func processMFASetupTask(task mfaSetupTask) {
 	unlockSession := lockLoginSession(task.SessionKey)
 	defer unlockSession()
 
-	requestLogger.Debug("processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
+	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
 	var session LoginSession
 	if s, ok := getTaskSession(task.Task); !ok || !checkNextStep(task.Task, s, NextStepMFASetup) {
@@ -290,7 +303,7 @@ func processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoftwareTokenTask
 	unlockSession := lockLoginSession(task.SessionKey)
 	defer unlockSession()
 
-	requestLogger.Debug("processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
+	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
 	var session LoginSession
 	if s, ok := getTaskSession(task.Task); !ok || !checkNextStep(task.Task, s, NextStepMFASoftwareTokenSetupVerify) {
@@ -310,7 +323,7 @@ func processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoftwareTokenTask
 		var est *cognitoTypes.EnableSoftwareTokenMFAException
 		if errors.As(err, &est) {
 			task.ResultChan <- TaskResult{
-				Err: loginTypes.InvalidMFASetupSoftwareTokenError,
+				Err: loginTypes.InvalidMFACodeError,
 			}
 			return
 		}
@@ -432,7 +445,7 @@ func processMFAVerifyTask(task mfaVerifyTask) {
 		session = s
 	}
 
-	requestLogger.Debug("processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User), zap.String("nextStep", string(session.nextStep)))
+	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User), zap.String("nextStep", string(session.nextStep)))
 
 	switch session.nextStep {
 	case NextStepMFASoftwareTokenVerify:
@@ -457,7 +470,7 @@ func processRefreshTokenTask(task refreshTokenTask) {
 	var err error
 	var authResult *cognitoTypes.AuthenticationResultType
 
-	requestLogger.Debug("processing", zap.String("username", task.User))
+	requestLogger.Log(processingLogLevel, "processing", zap.String("username", task.User))
 
 	if useAuthToRefresh {
 		input := &cognitoidentityprovider.InitiateAuthInput{
@@ -524,7 +537,7 @@ func processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUpdateRequestTa
 	unlockSession := lockLoginSession(task.SessionKey)
 	defer unlockSession()
 
-	requestLogger.Debug("processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
+	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
 	var session LoginSession
 	if s, ok := getTaskSession(task.Task); !ok || !checkNextStep(task.Task, s, NextStepNewPassword) {
@@ -595,23 +608,25 @@ func processLogOutTask(task logOutTask) {
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	requestLogger.Debug("processing")
-
-	input := &cognitoidentityprovider.RevokeTokenInput{
-		ClientId: aws.String(cognitoClientID),
-		Token:    aws.String(task.RefreshToken),
-	}
-
-	if cognitoClientSecret != "" {
-		input.ClientSecret = aws.String(cognitoClientSecret)
-	}
-
-	_, err := cognitoClient.RevokeToken(task.Context, input)
+	requestLogger.Log(processingLogLevel, "processing")
 
 	//always report success
-	if err != nil {
-		requestLogger.Warn("failed to revoke token", zap.Error(err))
-	}
+	go func() {
+		input := &cognitoidentityprovider.RevokeTokenInput{
+			ClientId: aws.String(cognitoClientID),
+			Token:    aws.String(task.RefreshToken),
+		}
+
+		if cognitoClientSecret != "" {
+			input.ClientSecret = aws.String(cognitoClientSecret)
+		}
+
+		_, err := cognitoClient.RevokeToken(task.Context, input)
+
+		if err != nil {
+			requestLogger.Warn("failed to revoke token", zap.Error(err))
+		}
+	}()
 
 	task.ResultChan <- TaskResult{}
 }
@@ -623,7 +638,7 @@ func processUpdatePasswordTask(task updatePasswordTask) {
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	requestLogger.Debug("processing")
+	requestLogger.Log(processingLogLevel, "processing")
 
 	_, err := jwksValidator.ValidateToken(task.AccessToken)
 
@@ -659,7 +674,7 @@ func processGetMFAStatusTask(task getMFAStatusTask) {
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	requestLogger.Debug("processing")
+	requestLogger.Log(processingLogLevel, "processing")
 
 	token, err := jwksValidator.ValidateToken(task.AccessToken)
 
@@ -790,7 +805,7 @@ func processUpdateMFATask(task updateMFATask) {
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	requestLogger.Debug("processing", zap.String("mfaType", string(task.MFAType)))
+	requestLogger.Log(processingLogLevel, "processing", zap.String("mfaType", string(task.MFAType)))
 
 	switch task.MFAType {
 	case loginTypes.MFATypeSoftwareToken:
@@ -817,7 +832,7 @@ func verifyMFASetupSoftwareToken(task verifyMFAUpdateTask) {
 		var est *cognitoTypes.EnableSoftwareTokenMFAException
 		if errors.As(err, &est) {
 			task.ResultChan <- TaskResult{
-				Err: loginTypes.InvalidMFASetupSoftwareTokenError,
+				Err: loginTypes.InvalidMFACodeError,
 			}
 			return
 		}
@@ -844,7 +859,7 @@ func processVerifyUpdateMFATask(task verifyMFAUpdateTask) {
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	requestLogger.Debug("processing")
+	requestLogger.Log(processingLogLevel, "processing")
 
 	var session LoginSession
 	if s, ok := getTaskSession(task.Task); !ok {
@@ -871,12 +886,12 @@ func processSelectMFATask(task selectMFATask) {
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	requestLogger.Debug("processing")
+	requestLogger.Log(processingLogLevel, "processing")
 
 	unlockSession := lockLoginSession(task.SessionKey)
 	defer unlockSession()
 
-	requestLogger.Debug("processing", zap.String("sessionKey", task.SessionKey), zap.String("mfaType", string(task.MFAType)))
+	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("mfaType", string(task.MFAType)))
 
 	var session LoginSession
 	if s, ok := getTaskSession(task.Task); !ok || !checkNextStep(task.Task, s, NextStepMFASelect) {
@@ -950,73 +965,69 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	requestLogger.Debug("processing", zap.String("email", task.Email))
+	requestLogger.Log(processingLogLevel, "processing", zap.String("email", task.Email))
 
-	users, err := findUsersByEmail(task.Context, task.Email)
-	if err != nil {
-		task.ResultChan <- TaskResult{
-			Err: err,
-		}
-		return
-	}
+	defer func() {
+		time.Sleep(100 * time.Millisecond) //always sleep a bit
 
-	simulateAPICallDelay := false
-	if len(users) > 1 {
-		requestLogger.Error("found multiple users with the same email", zap.String("email", task.Email))
-		simulateAPICallDelay = true
-	} else if len(users) == 0 {
-		requestLogger.Warn("attempted password recovery for non existing email", zap.String("email", task.Email))
-		simulateAPICallDelay = true
-	}
-
-	if simulateAPICallDelay {
-		time.Sleep(time.Duration(rand.Intn(200)+150) * time.Millisecond)
-	} else {
-		token := tools.GenerateRandomString(32)
-		user := users[0]
-
-		resetSettings := passwordreset.GetSettings()
-
-		createResetPasswordSession(token, *user.Username, task.Email, time.Now().Add(resetSettings.ValidFor))
-
-		resetLink := fmt.Sprintf("%s/v1/password/reset?token=%s", config.GetURLBase(), token)
-
-		templateData := map[string]interface{}{
-			"username":      *user.Username,
-			"resetLink":     resetLink,
-			"expiryMinutes": uint64(resetSettings.ValidFor.Minutes()),
-			"companyName":   resetSettings.Company,
-			"currentYear":   resetSettings.Year,
-		}
-
-		templateJSON, err := json.Marshal(templateData)
+		users, err := findUsersByEmail(task.Context, task.Email)
 		if err != nil {
 			task.ResultChan <- TaskResult{
-				Err: loginTypes.NewInternalError(err.Error(), err),
+				Err: err,
 			}
 			return
 		}
 
-		input := &ses.SendTemplatedEmailInput{
-			Source: aws.String(resetSettings.Sender),
-			Destination: &sesTypes.Destination{
-				ToAddresses: []string{task.Email},
-			},
-			Template:     aws.String(resetSettings.TemplateName),
-			TemplateData: aws.String(string(templateJSON)),
-		}
+		if len(users) > 1 {
+			requestLogger.Error("found multiple users with the same email", zap.String("email", task.Email))
+		} else if len(users) == 0 {
+			requestLogger.Warn("attempted password recovery for non existing email", zap.String("email", task.Email))
+		} else {
+			token := tools.GenerateRandomString(32)
+			user := users[0]
 
-		result, err := sesClient.SendTemplatedEmail(task.Context, input)
-		if err != nil {
-			task.ResultChan <- TaskResult{
-				Err: loginTypes.NewInternalError(err.Error(), err),
+			resetSettings := passwordreset.GetSettings()
+
+			createResetPasswordSession(token, *user.Username, task.Email, time.Now().Add(resetSettings.ValidFor))
+
+			resetLink := fmt.Sprintf("%s/v1/password/reset?token=%s", config.GetURLBase(), token)
+
+			templateData := map[string]interface{}{
+				"username":      *user.Username,
+				"resetLink":     resetLink,
+				"expiryMinutes": uint64(resetSettings.ValidFor.Minutes()),
+				"companyName":   resetSettings.Company,
+				"currentYear":   resetSettings.Year,
 			}
-			return
+
+			templateJSON, err := json.Marshal(templateData)
+			if err != nil {
+				task.ResultChan <- TaskResult{
+					Err: loginTypes.NewInternalError(err.Error(), err),
+				}
+				return
+			}
+
+			input := &ses.SendTemplatedEmailInput{
+				Source: aws.String(resetSettings.Sender),
+				Destination: &sesTypes.Destination{
+					ToAddresses: []string{task.Email},
+				},
+				Template:     aws.String(resetSettings.TemplateName),
+				TemplateData: aws.String(string(templateJSON)),
+			}
+
+			result, err := sesClient.SendTemplatedEmail(task.Context, input)
+			if err != nil {
+				task.ResultChan <- TaskResult{
+					Err: loginTypes.NewInternalError(err.Error(), err),
+				}
+				return
+			}
+
+			requestLogger.Info("sent reset password message", zap.String("email", task.Email), zap.String("user", *user.Username), zap.String("messageId", *result.MessageId))
 		}
-
-		requestLogger.Info("sent reset password message", zap.String("email", task.Email), zap.String("user", *user.Username), zap.String("messageId", *result.MessageId))
-
-	}
+	}()
 
 	task.ResultChan <- TaskResult{}
 }
@@ -1028,7 +1039,7 @@ func processResetPasswordTask(task resetPasswordTask) {
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	requestLogger.Debug("processing")
+	requestLogger.Log(processingLogLevel, "processing")
 
 	session, ok := getResetPasswordSession(task.Token)
 	if !ok || session.used {
@@ -1078,7 +1089,7 @@ func processFinalizePasswordResetTask(task finalizePasswordResetTask) {
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	requestLogger.Debug("processing", zap.String("user", task.User))
+	requestLogger.Log(processingLogLevel, "processing", zap.String("user", task.User))
 
 	input := &cognitoidentityprovider.ConfirmForgotPasswordInput{
 		ClientId:         aws.String(cognitoClientID),

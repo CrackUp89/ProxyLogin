@@ -43,11 +43,8 @@ func getLogger() *zap.Logger {
 	return cognitoLogger
 }
 
-func init() {
-	viper.SetDefault("cognito.workers", 1000)
-}
-
 func loadSettings() error {
+
 	cognitoClientID = viper.GetString("cognito.clientId")
 	cognitoClientSecret = viper.GetString("cognito.clientSecret")
 	cognitoUserPoolID = viper.GetString("cognito.userPoolId")
@@ -70,7 +67,13 @@ func loadSettings() error {
 
 	jwksValidator, err = tools.NewJWKSValidator(cognitoJWKSKeySigningURL, cognitoJWKSIssuer, "")
 
-	return err
+	if err != nil {
+		return err
+	}
+
+	loadProcessingSettings()
+
+	return nil
 }
 
 func validateSettings() error {

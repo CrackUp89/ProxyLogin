@@ -1,8 +1,13 @@
 package cognito
 
 import (
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
+
+func init() {
+	viper.SetDefault("cognito.workers", 1000)
+}
 
 var workersLogger *zap.Logger
 

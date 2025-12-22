@@ -22,10 +22,10 @@ type Task struct {
 	ResultChan TaskResultChan
 }
 
-func createTaskChan[T any]() (chan T, func() error) {
+func createTaskChan[T any]() (chan T, func() types.GenericError) {
 	channel := make(chan T)
 	maxLength := 1000
-	return channel, func() error {
+	return channel, func() types.GenericError {
 		if len(channel) >= maxLength {
 			return types.NewTooManyTasks(fmt.Sprint(reflect.TypeOf(channel)))
 		}
@@ -41,7 +41,7 @@ type loginTask struct {
 
 var loginTasks, loginTasksValidate = createTaskChan[loginTask]()
 
-func AddLoginTask(ctx context.Context, sessionKey string, user string, password string) (TaskResultChan, error) {
+func AddLoginTask(ctx context.Context, sessionKey string, user string, password string) (TaskResultChan, types.GenericError) {
 	if err := loginTasksValidate(); err != nil {
 		return nil, err
 	}
@@ -58,7 +58,7 @@ type mfaSetupTask struct {
 
 var mfaSetupTasks, mfaSetupTasksValidate = createTaskChan[mfaSetupTask]()
 
-func AddMFASetupTask(ctx context.Context, sessionKey string, user string, setupType types.MFAType) (TaskResultChan, error) {
+func AddMFASetupTask(ctx context.Context, sessionKey string, user string, setupType types.MFAType) (TaskResultChan, types.GenericError) {
 	if err := mfaSetupTasksValidate(); err != nil {
 		return nil, err
 	}
@@ -75,7 +75,7 @@ type mfaSetupVerifySoftwareTokenTask struct {
 
 var mfaSetupSoftwareTokenVerifyTasks, mfaSetupSoftwareTokenVerifyTasksValidate = createTaskChan[mfaSetupVerifySoftwareTokenTask]()
 
-func AddMFASetupVerifySoftwareTokenTask(ctx context.Context, sessionKey string, user string, code string) (TaskResultChan, error) {
+func AddMFASetupVerifySoftwareTokenTask(ctx context.Context, sessionKey string, user string, code string) (TaskResultChan, types.GenericError) {
 	if err := mfaSetupSoftwareTokenVerifyTasksValidate(); err != nil {
 		return nil, err
 	}
@@ -92,7 +92,7 @@ type mfaVerifyTask struct {
 
 var mfaVerifyTasks, mfaVerifyTasksValidate = createTaskChan[mfaVerifyTask]()
 
-func AddMFAVerifyTask(ctx context.Context, sessionKey string, user string, code string) (TaskResultChan, error) {
+func AddMFAVerifyTask(ctx context.Context, sessionKey string, user string, code string) (TaskResultChan, types.GenericError) {
 	if err := mfaVerifyTasksValidate(); err != nil {
 		return nil, err
 	}
@@ -109,7 +109,7 @@ type refreshTokenTask struct {
 
 var refreshTokenTasks, refreshTokenTasksValidate = createTaskChan[refreshTokenTask]()
 
-func AddRefreshTokenTask(ctx context.Context, sessionKey string, user string, refreshToken string) (TaskResultChan, error) {
+func AddRefreshTokenTask(ctx context.Context, sessionKey string, user string, refreshToken string) (TaskResultChan, types.GenericError) {
 	if err := refreshTokenTasksValidate(); err != nil {
 		return nil, err
 	}
@@ -125,7 +125,7 @@ type logOutTask struct {
 
 var logOutTasks, logOutTasksValidate = createTaskChan[logOutTask]()
 
-func AddLogOutTask(ctx context.Context, sessionKey string, refreshToken string) (TaskResultChan, error) {
+func AddLogOutTask(ctx context.Context, sessionKey string, refreshToken string) (TaskResultChan, types.GenericError) {
 	if err := logOutTasksValidate(); err != nil {
 		return nil, err
 	}
@@ -143,7 +143,7 @@ type satisfyPasswordUpdateRequestTask struct {
 
 var satisfyPasswordUpdateRequestTasks, satisfyPasswordUpdateRequestTasksValidate = createTaskChan[satisfyPasswordUpdateRequestTask]()
 
-func AddSatisfyPasswordUpdateRequestTask(ctx context.Context, sessionKey string, user string, password string, attributes map[string]string) (TaskResultChan, error) {
+func AddSatisfyPasswordUpdateRequestTask(ctx context.Context, sessionKey string, user string, password string, attributes map[string]string) (TaskResultChan, types.GenericError) {
 	if err := satisfyPasswordUpdateRequestTasksValidate(); err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ type updatePasswordTask struct {
 
 var updatePasswordTasks, updatePasswordTasksValidate = createTaskChan[updatePasswordTask]()
 
-func AddUpdatePasswordTask(ctx context.Context, accessToken string, currentPassword string, newPassword string) (TaskResultChan, error) {
+func AddUpdatePasswordTask(ctx context.Context, accessToken string, currentPassword string, newPassword string) (TaskResultChan, types.GenericError) {
 	if err := updatePasswordTasksValidate(); err != nil {
 		return nil, err
 	}
@@ -177,7 +177,7 @@ type getMFAStatusTask struct {
 
 var getMFAStatusTasks, getMFAStatusTasksValidate = createTaskChan[getMFAStatusTask]()
 
-func AddGetMFAStatusTask(ctx context.Context, accessToken string) (TaskResultChan, error) {
+func AddGetMFAStatusTask(ctx context.Context, accessToken string) (TaskResultChan, types.GenericError) {
 	if err := getMFAStatusTasksValidate(); err != nil {
 		return nil, err
 	}
@@ -194,7 +194,7 @@ type updateMFATask struct {
 
 var updateMFATasks, updateMFATasksValidate = createTaskChan[updateMFATask]()
 
-func AddUpdateMFATask(ctx context.Context, sessionKey string, accessToken string, mfaType types.MFAType) (TaskResultChan, error) {
+func AddUpdateMFATask(ctx context.Context, sessionKey string, accessToken string, mfaType types.MFAType) (TaskResultChan, types.GenericError) {
 	if err := updateMFATasksValidate(); err != nil {
 		return nil, err
 	}
@@ -211,7 +211,7 @@ type verifyMFAUpdateTask struct {
 
 var verifyMFAUpdateTasks, verifyMFAUpdateTasksValidate = createTaskChan[verifyMFAUpdateTask]()
 
-func AddVerifyMFAUpdateTask(ctx context.Context, sessionKey string, accessToken string, code string) (TaskResultChan, error) {
+func AddVerifyMFAUpdateTask(ctx context.Context, sessionKey string, accessToken string, code string) (TaskResultChan, types.GenericError) {
 	if err := verifyMFAUpdateTasksValidate(); err != nil {
 		return nil, err
 	}
@@ -229,7 +229,7 @@ type selectMFATask struct {
 
 var selectMFATasks, selectMFATasksValidate = createTaskChan[selectMFATask]()
 
-func AddSelectMFATask(ctx context.Context, sessionKey string, user string, MFAType types.MFAType) (TaskResultChan, error) {
+func AddSelectMFATask(ctx context.Context, sessionKey string, user string, MFAType types.MFAType) (TaskResultChan, types.GenericError) {
 	if err := selectMFATasksValidate(); err != nil {
 		return nil, err
 	}
@@ -245,7 +245,7 @@ type initiatePasswordResetTask struct {
 
 var initiatePasswordResetTasks, initiatePasswordResetTasksValidate = createTaskChan[initiatePasswordResetTask]()
 
-func AddInitiatePasswordResetTask(ctx context.Context, email string) (TaskResultChan, error) {
+func AddInitiatePasswordResetTask(ctx context.Context, email string) (TaskResultChan, types.GenericError) {
 	if err := initiatePasswordResetTasksValidate(); err != nil {
 		return nil, err
 	}
@@ -261,7 +261,7 @@ type resetPasswordTask struct {
 
 var resetPasswordTasks, resetPasswordTasksValidate = createTaskChan[resetPasswordTask]()
 
-func AddResetPasswordTask(ctx context.Context, token string) (TaskResultChan, error) {
+func AddResetPasswordTask(ctx context.Context, token string) (TaskResultChan, types.GenericError) {
 	if err := resetPasswordTasksValidate(); err != nil {
 		return nil, err
 	}
@@ -279,7 +279,7 @@ type finalizePasswordResetTask struct {
 
 var finalizePasswordResetTasks, finalizePasswordResetTasksValidate = createTaskChan[finalizePasswordResetTask]()
 
-func AddFinalizePasswordResetTask(ctx context.Context, user string, code string, password string) (TaskResultChan, error) {
+func AddFinalizePasswordResetTask(ctx context.Context, user string, code string, password string) (TaskResultChan, types.GenericError) {
 	if err := finalizePasswordResetTasksValidate(); err != nil {
 		return nil, err
 	}

@@ -20,6 +20,6 @@ func (t TooManyTasks) Code() int {
 	return 9000
 }
 
-func NewTooManyTasks(taskName string) error {
+func NewTooManyTasks(taskName string) TooManyTasks {
 	return TooManyTasks{taskName: taskName}
 }

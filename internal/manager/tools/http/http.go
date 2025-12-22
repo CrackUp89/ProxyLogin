@@ -7,6 +7,7 @@ import (
 	"proxylogin/internal/manager/logging"
 	"proxylogin/internal/manager/login/types"
 	"proxylogin/internal/manager/tools/json"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,6 +32,10 @@ type ErrorResponse struct {
 
 func NewErrorResponse(code int, message string) ErrorResponse {
 	return ErrorResponse{Code: code, Message: message}
+}
+
+func WriteTooManyRequests(w http.ResponseWriter) error {
+	return json.EncodeJSON(w, http.StatusTooManyRequests, NewErrorResponse(-2, "too many requests"))
 }
 
 func WriteBadRequest(w http.ResponseWriter, err error) error {
@@ -124,6 +129,13 @@ func (receiver *RequestMetadata) GetZapFields() []zap.Field {
 		zap.String("real_ip", receiver.RealIP),
 		zap.String("forwarded_for", receiver.ForwardedFor),
 	}
+}
+
+func (receiver *RequestMetadata) GetClientIP() string {
+	if receiver.RealIP != "" {
+		return receiver.RealIP
+	}
+	return receiver.RemoteAddr[:strings.LastIndex(receiver.RemoteAddr, ":")]
 }
 
 func GetLoggerWithRequestMetadataFields(l *zap.Logger, ctx context.Context) *zap.Logger {
