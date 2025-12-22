@@ -10,7 +10,14 @@ import (
 	"go.uber.org/zap"
 )
 
-var sessionsLogger = tools.NewLogger("Cognito.Sessions")
+var sessionsLogger *zap.Logger
+
+func getSessionsLogger() *zap.Logger {
+	if sessionsLogger == nil {
+		sessionsLogger = getLogger().Named("sessions")
+	}
+	return sessionsLogger
+}
 
 type NextStep string
 
@@ -25,6 +32,10 @@ const (
 	NextStepNewPassword                 NextStep = "new_password"
 )
 
+func (s NextStep) String() string {
+	return string(s)
+}
+
 type withValidityTimeframe interface {
 	GetStartTime() time.Time
 	GetExpirationTime() time.Time
@@ -34,7 +45,7 @@ func cleanupExpiredSessions[T withValidityTimeframe](sessions *sync.Map) {
 	sessions.Range(func(k, v interface{}) bool {
 		session := v.(T)
 		if session.GetStartTime().After(time.Now()) {
-			sessionsLogger.Info("session expired",
+			getSessionsLogger().Info("session expired",
 				zap.String("session", k.(string)),
 				zap.String("type", fmt.Sprint(reflect.TypeOf(session))))
 			sessions.Delete(k)
@@ -53,7 +64,7 @@ func StartSessionCleanupRoutine() func() {
 				cleanupExpiredSessions[LoginSession](activeLoginSessions)
 				cleanupExpiredSessions[*initiateResetPasswordSession](activeInitiateResetPasswordSessions)
 			case <-stop:
-				sessionsLogger.Info("Session cleanup routine stopped")
+				getSessionsLogger().Info("Session cleanup routine stopped")
 				return
 			}
 		}
@@ -68,7 +79,7 @@ var loginSessionMutexManager = tools.NamedMutexManager{}
 func lockLoginSession(sessionKey string) func() {
 	if sessionKey == "" {
 		return func() {
-			logger.Warn("can not lock session - session key is empty", zap.Stack("stack"))
+			getSessionsLogger().Warn("can not lock session - session key is empty", zap.Stack("stack"))
 		}
 	}
 	lock := loginSessionMutexManager.GetNamedMutex(sessionKey)

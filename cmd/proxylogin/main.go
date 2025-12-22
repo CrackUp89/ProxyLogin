@@ -6,15 +6,12 @@ import (
 	"log"
 	"os"
 	"proxylogin/internal/manager/server"
-	"proxylogin/internal/manager/tools"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
-
-var logger = tools.NewLogger("cmd")
 
 var rootCmd = &cobra.Command{
 	Use: "ProxyLogin",
@@ -32,9 +29,7 @@ var serveCmd = &cobra.Command{
 func loadViperConfig() error {
 	if err := viper.ReadInConfig(); err != nil {
 		var nf viper.ConfigFileNotFoundError
-		if errors.As(err, &nf) {
-			logger.Info("Config file does not exist")
-		} else {
+		if !errors.As(err, &nf) {
 			return err
 		}
 	}
@@ -74,7 +69,7 @@ func loadEnvFile() {
 	if err = v.ReadInConfig(); err != nil {
 		var nf viper.ConfigFileNotFoundError
 		if !errors.As(err, &nf) {
-			logger.Error(err.Error())
+			log.Fatal(err)
 		}
 	}
 

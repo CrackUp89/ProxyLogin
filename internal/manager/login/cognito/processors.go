@@ -48,7 +48,7 @@ func handleChallenge(challenge cognitoTypes.ChallengeNameType, challengeParamete
 
 	if challenge == "" {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError("Challenge is empty", "Authentication error", nil),
+			Err: loginTypes.NewInternalError("challenge is empty", nil),
 		}
 		return
 	}
@@ -70,7 +70,7 @@ func handleChallenge(challenge cognitoTypes.ChallengeNameType, challengeParamete
 			}
 		} else {
 			task.ResultChan <- TaskResult{
-				Err: loginTypes.NewGenericAuthenticationError("No MFA methods available", "Authentication error", nil),
+				Err: loginTypes.NewInternalError("no MFA methods available for user login", nil),
 			}
 			return
 		}
@@ -84,7 +84,7 @@ func handleChallenge(challenge cognitoTypes.ChallengeNameType, challengeParamete
 			}
 		} else {
 			task.ResultChan <- TaskResult{
-				Err: loginTypes.NewGenericAuthenticationError("No MFA methods available", "Authentication error", nil),
+				Err: loginTypes.NewInternalError("no MFA methods available to setup for user", nil),
 			}
 			return
 		}
@@ -110,7 +110,7 @@ func handleChallenge(challenge cognitoTypes.ChallengeNameType, challengeParamete
 		break
 	default:
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError("Unsupported challenge type", "Authentication error", nil),
+			Err: loginTypes.NewInternalError("unsupported challenge type: "+string(challenge), nil),
 		}
 		return
 	}
@@ -134,7 +134,7 @@ func getTaskSession(t Task) (LoginSession, bool) {
 func checkNextStep(t Task, s LoginSession, expectedStep NextStep) bool {
 	if s.nextStep != expectedStep {
 		t.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(fmt.Sprintf("unexpected next step: %s; expected: %s", s.nextStep, expectedStep), "authentication error", nil),
+			Err: loginTypes.NewBadRequestError(fmt.Sprintf("unexpected next step: %s; expected: %s", s.nextStep, expectedStep), "unexpected next step", nil),
 		}
 		return false
 	}
@@ -161,11 +161,15 @@ func mapMFAList(mfaTypes []string) []loginTypes.MFAType {
 func checkTaskContext(t Task) bool {
 	if err := t.Context.Err(); err != nil {
 		t.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Authentication error", err),
+			Err: loginTypes.NewInternalError(err.Error(), err),
 		}
 		return false
 	}
 	return true
+}
+
+func getRequestLoggerFromTask(task Task) *zap.Logger {
+	return getRequestLogger(task.Context).Named("processors")
 }
 
 func processLoginTask(task loginTask) {
@@ -173,10 +177,12 @@ func processLoginTask(task loginTask) {
 		return
 	}
 
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
 	unlockSession := lockLoginSession(task.SessionKey)
 	defer unlockSession()
 
-	logger.Debug("processLoginTask", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
+	requestLogger.Debug("processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
 	authInput := &cognitoidentityprovider.InitiateAuthInput{
 		AuthFlow: cognitoTypes.AuthFlowTypeUserPasswordAuth,
@@ -204,7 +210,7 @@ func processLoginTask(task loginTask) {
 		}
 
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Authentication error", err),
+			Err: loginTypes.NewInternalError(err.Error(), err),
 		}
 		return
 	}
@@ -217,7 +223,7 @@ func processLoginTask(task loginTask) {
 			return
 		} else {
 			task.ResultChan <- TaskResult{
-				Err: loginTypes.NewGenericAuthenticationError("no challenge requested and no authentication result received", "authentication error", nil),
+				Err: NoChallengeOrAuthenticationResultError,
 			}
 			return
 		}
@@ -231,10 +237,12 @@ func processMFASetupTask(task mfaSetupTask) {
 		return
 	}
 
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
 	unlockSession := lockLoginSession(task.SessionKey)
 	defer unlockSession()
 
-	logger.Debug("processMFASetupTask", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
+	requestLogger.Debug("processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
 	var session LoginSession
 	if s, ok := getTaskSession(task.Task); !ok || !checkNextStep(task.Task, s, NextStepMFASetup) {
@@ -245,7 +253,6 @@ func processMFASetupTask(task mfaSetupTask) {
 
 	switch task.MFAType {
 	case loginTypes.MFATypeSoftwareToken:
-		logger.Debug("processMFASetupTask MFATypeSoftwareToken", zap.String("username", task.User))
 
 		associateInput := &cognitoidentityprovider.AssociateSoftwareTokenInput{
 			Session: &session.cognitoSession,
@@ -254,7 +261,7 @@ func processMFASetupTask(task mfaSetupTask) {
 		associateResult, err := cognitoClient.AssociateSoftwareToken(task.Context, associateInput)
 		if err != nil {
 			task.ResultChan <- TaskResult{
-				Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Authentication error", err),
+				Err: loginTypes.WrapWithInternalError(err),
 			}
 			return
 		}
@@ -269,7 +276,7 @@ func processMFASetupTask(task mfaSetupTask) {
 	}
 
 	task.ResultChan <- TaskResult{
-		Err: loginTypes.NewGenericAuthenticationError("Unsupported MFA setup type", "Authentication error", nil),
+		Err: loginTypes.NewBadRequestError("unsupported MFA setup type", "unsupported MFA setup type", nil),
 	}
 }
 
@@ -278,10 +285,12 @@ func processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoftwareTokenTask
 		return
 	}
 
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
 	unlockSession := lockLoginSession(task.SessionKey)
 	defer unlockSession()
 
-	logger.Debug("processMFASetupVerifySoftwareTokenTask", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
+	requestLogger.Debug("processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
 	var session LoginSession
 	if s, ok := getTaskSession(task.Task); !ok || !checkNextStep(task.Task, s, NextStepMFASoftwareTokenSetupVerify) {
@@ -306,14 +315,14 @@ func processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoftwareTokenTask
 			return
 		}
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Authentication error", err),
+			Err: loginTypes.WrapWithInternalError(err),
 		}
 		return
 	}
 
 	if verifyResult.Status != cognitoTypes.VerifySoftwareTokenResponseTypeSuccess {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError("no error raised but response is not successful", "Authentication error", nil),
+			Err: InconclusiveResponseError,
 		}
 		return
 	}
@@ -334,7 +343,7 @@ func processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoftwareTokenTask
 	finalResult, err := cognitoClient.RespondToAuthChallenge(task.Context, challengeInput)
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Authentication error", err),
+			Err: loginTypes.WrapWithInternalError(err),
 		}
 		return
 	}
@@ -380,7 +389,7 @@ func verifyMFACode(session LoginSession, task mfaVerifyTask, step NextStep) {
 	result, err := cognitoClient.RespondToAuthChallenge(task.Context, challengeResp)
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Authentication error", err),
+			Err: loginTypes.WrapWithInternalError(err),
 		}
 		return
 	}
@@ -393,7 +402,7 @@ func verifyMFACode(session LoginSession, task mfaVerifyTask, step NextStep) {
 			return
 		} else {
 			task.ResultChan <- TaskResult{
-				Err: loginTypes.NewGenericAuthenticationError("no challenge requested and no authentication result received", "authentication error", nil),
+				Err: NoChallengeOrAuthenticationResultError,
 			}
 			return
 		}
@@ -406,6 +415,8 @@ func processMFAVerifyTask(task mfaVerifyTask) {
 	if !checkTaskContext(task.Task) {
 		return
 	}
+
+	requestLogger := getRequestLoggerFromTask(task.Task)
 
 	unlockSession := lockLoginSession(task.SessionKey)
 	defer unlockSession()
@@ -421,6 +432,8 @@ func processMFAVerifyTask(task mfaVerifyTask) {
 		session = s
 	}
 
+	requestLogger.Debug("processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User), zap.String("nextStep", string(session.nextStep)))
+
 	switch session.nextStep {
 	case NextStepMFASoftwareTokenVerify:
 		fallthrough
@@ -430,7 +443,7 @@ func processMFAVerifyTask(task mfaVerifyTask) {
 		verifyMFACode(session, task, session.nextStep)
 	}
 	task.ResultChan <- TaskResult{
-		Err: loginTypes.NewGenericAuthenticationError(fmt.Sprintf("unexpected next step: %s", session.nextStep), "authentication error", nil),
+		Err: NewNextStepError([]NextStep{NextStepMFASoftwareTokenVerify, NextStepMFAEMailVerify, NextStepMFASMSVerify}, session.nextStep),
 	}
 }
 
@@ -439,8 +452,12 @@ func processRefreshTokenTask(task refreshTokenTask) {
 		return
 	}
 
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
 	var err error
 	var authResult *cognitoTypes.AuthenticationResultType
+
+	requestLogger.Debug("processing", zap.String("username", task.User))
 
 	if useAuthToRefresh {
 		input := &cognitoidentityprovider.InitiateAuthInput{
@@ -480,7 +497,7 @@ func processRefreshTokenTask(task refreshTokenTask) {
 
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Authentication error", err),
+			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "authentication error", err),
 		}
 		return
 	}
@@ -493,7 +510,7 @@ func processRefreshTokenTask(task refreshTokenTask) {
 	}
 
 	task.ResultChan <- TaskResult{
-		Err: loginTypes.NewGenericAuthenticationError("no authentication result received", "authentication error", nil),
+		Err: InconclusiveResponseError,
 	}
 }
 
@@ -502,10 +519,12 @@ func processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUpdateRequestTa
 		return
 	}
 
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
 	unlockSession := lockLoginSession(task.SessionKey)
 	defer unlockSession()
 
-	logger.Debug("processSatisfyPasswordUpdateRequestTask", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
+	requestLogger.Debug("processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
 	var session LoginSession
 	if s, ok := getTaskSession(task.Task); !ok || !checkNextStep(task.Task, s, NextStepNewPassword) {
@@ -547,7 +566,7 @@ func processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUpdateRequestTa
 		}
 
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Authentication error", err),
+			Err: loginTypes.WrapWithInternalError(err),
 		}
 		return
 	}
@@ -560,7 +579,7 @@ func processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUpdateRequestTa
 			return
 		} else {
 			task.ResultChan <- TaskResult{
-				Err: loginTypes.NewGenericAuthenticationError("no challenge requested and no authentication result received", "authentication error", nil),
+				Err: NoChallengeOrAuthenticationResultError,
 			}
 			return
 		}
@@ -574,6 +593,10 @@ func processLogOutTask(task logOutTask) {
 		return
 	}
 
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
+	requestLogger.Debug("processing")
+
 	input := &cognitoidentityprovider.RevokeTokenInput{
 		ClientId: aws.String(cognitoClientID),
 		Token:    aws.String(task.RefreshToken),
@@ -585,11 +608,9 @@ func processLogOutTask(task logOutTask) {
 
 	_, err := cognitoClient.RevokeToken(task.Context, input)
 
+	//always report success
 	if err != nil {
-		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Logout error", err),
-		}
-		return
+		requestLogger.Warn("failed to revoke token", zap.Error(err))
 	}
 
 	task.ResultChan <- TaskResult{}
@@ -600,17 +621,30 @@ func processUpdatePasswordTask(task updatePasswordTask) {
 		return
 	}
 
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
+	requestLogger.Debug("processing")
+
+	_, err := jwksValidator.ValidateToken(task.AccessToken)
+
+	if err != nil {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "invalid token", err),
+		}
+		return
+	}
+
 	input := &cognitoidentityprovider.ChangePasswordInput{
 		AccessToken:      aws.String(task.AccessToken),
 		PreviousPassword: aws.String(task.CurrentPassword),
 		ProposedPassword: aws.String(task.NewPassword),
 	}
 
-	_, err := cognitoClient.ChangePassword(task.Context, input)
+	_, err = cognitoClient.ChangePassword(task.Context, input)
 
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Logout error", err),
+			Err: loginTypes.WrapWithInternalError(err),
 		}
 		return
 	}
@@ -623,13 +657,17 @@ func processGetMFAStatusTask(task getMFAStatusTask) {
 		return
 	}
 
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
+	requestLogger.Debug("processing")
+
 	token, err := jwksValidator.ValidateToken(task.AccessToken)
 
 	var username string
 
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Invalid token", err),
+			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "invalid token", err),
 		}
 		return
 	}
@@ -640,7 +678,7 @@ func processGetMFAStatusTask(task getMFAStatusTask) {
 		}
 	} else {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError("token is invalid or does not contain username", "Invalid token", nil),
+			Err: loginTypes.NewGenericAuthenticationError("token is invalid or does not contain username", "invalid token", nil),
 		}
 		return
 	}
@@ -654,7 +692,7 @@ func processGetMFAStatusTask(task getMFAStatusTask) {
 
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Logout error", err),
+			Err: loginTypes.WrapWithInternalError(err),
 		}
 		return
 	}
@@ -732,7 +770,7 @@ func updateSoftwareToken(task updateMFATask) {
 	associateResult, err := cognitoClient.AssociateSoftwareToken(context.TODO(), associateInput)
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewInternalError(err.Error(), "Internal error", err),
+			Err: loginTypes.WrapWithInternalError(err),
 		}
 		return
 	}
@@ -750,13 +788,17 @@ func processUpdateMFATask(task updateMFATask) {
 		return
 	}
 
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
+	requestLogger.Debug("processing", zap.String("mfaType", string(task.MFAType)))
+
 	switch task.MFAType {
 	case loginTypes.MFATypeSoftwareToken:
 		updateSoftwareToken(task)
 		return
 	default:
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError("MFA method not supported", "MFA method not supported", nil),
+			Err: loginTypes.NewBadRequestError("MFA method not supported", "MFA method not supported", nil),
 		}
 		return
 	}
@@ -787,7 +829,7 @@ func verifyMFASetupSoftwareToken(task verifyMFAUpdateTask) {
 
 	if result.Status != cognitoTypes.VerifySoftwareTokenResponseTypeSuccess {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError("no error raised but response is not successful", "Authentication error", nil),
+			Err: InconclusiveResponseError,
 		}
 		return
 	}
@@ -799,6 +841,10 @@ func processVerifyUpdateMFATask(task verifyMFAUpdateTask) {
 	if !checkTaskContext(task.Task) {
 		return
 	}
+
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
+	requestLogger.Debug("processing")
 
 	var session LoginSession
 	if s, ok := getTaskSession(task.Task); !ok {
@@ -812,7 +858,7 @@ func processVerifyUpdateMFATask(task verifyMFAUpdateTask) {
 		verifyMFASetupSoftwareToken(task)
 	default:
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError("MFA method not supported", "Invalid input", nil),
+			Err: loginTypes.NewBadRequestError("MFA method not supported", "MFA method not supported", nil),
 		}
 		return
 	}
@@ -823,10 +869,14 @@ func processSelectMFATask(task selectMFATask) {
 		return
 	}
 
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
+	requestLogger.Debug("processing")
+
 	unlockSession := lockLoginSession(task.SessionKey)
 	defer unlockSession()
 
-	logger.Debug("processChooseMFATask", zap.String("sessionKey", task.SessionKey), zap.String("mfaType", string(task.MFAType)))
+	requestLogger.Debug("processing", zap.String("sessionKey", task.SessionKey), zap.String("mfaType", string(task.MFAType)))
 
 	var session LoginSession
 	if s, ok := getTaskSession(task.Task); !ok || !checkNextStep(task.Task, s, NextStepMFASelect) {
@@ -879,7 +929,7 @@ func findUsersByEmail(ctx context.Context, email string) ([]cognitoTypes.UserTyp
 
 	result, err := cognitoClient.ListUsers(ctx, input)
 	if err != nil {
-		return nil, loginTypes.NewInternalError(err.Error(), "internal error", err)
+		return nil, loginTypes.NewInternalError(err.Error(), err)
 	}
 
 	return result.Users, nil
@@ -898,6 +948,10 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 		return
 	}
 
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
+	requestLogger.Debug("processing", zap.String("email", task.Email))
+
 	users, err := findUsersByEmail(task.Context, task.Email)
 	if err != nil {
 		task.ResultChan <- TaskResult{
@@ -908,10 +962,10 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 
 	simulateAPICallDelay := false
 	if len(users) > 1 {
-		logger.Error("found multiple users with the same email", zap.String("email", task.Email))
+		requestLogger.Error("found multiple users with the same email", zap.String("email", task.Email))
 		simulateAPICallDelay = true
 	} else if len(users) == 0 {
-		logger.Warn("attempted password recovery for non existing email", zap.String("email", task.Email))
+		requestLogger.Warn("attempted password recovery for non existing email", zap.String("email", task.Email))
 		simulateAPICallDelay = true
 	}
 
@@ -938,7 +992,7 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 		templateJSON, err := json.Marshal(templateData)
 		if err != nil {
 			task.ResultChan <- TaskResult{
-				Err: loginTypes.NewInternalError(err.Error(), "internal error", err),
+				Err: loginTypes.NewInternalError(err.Error(), err),
 			}
 			return
 		}
@@ -955,12 +1009,12 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 		result, err := sesClient.SendTemplatedEmail(task.Context, input)
 		if err != nil {
 			task.ResultChan <- TaskResult{
-				Err: loginTypes.NewInternalError(err.Error(), "internal error", err),
+				Err: loginTypes.NewInternalError(err.Error(), err),
 			}
 			return
 		}
 
-		logger.Info("sent reset password message", zap.String("email", task.Email), zap.String("user", *user.Username), zap.String("messageId", *result.MessageId))
+		requestLogger.Info("sent reset password message", zap.String("email", task.Email), zap.String("user", *user.Username), zap.String("messageId", *result.MessageId))
 
 	}
 
@@ -971,6 +1025,10 @@ func processResetPasswordTask(task resetPasswordTask) {
 	if !checkTaskContext(task.Task) {
 		return
 	}
+
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
+	requestLogger.Debug("processing")
 
 	session, ok := getResetPasswordSession(task.Token)
 	if !ok || session.used {
@@ -995,12 +1053,12 @@ func processResetPasswordTask(task resetPasswordTask) {
 
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewInternalError(err.Error(), "internal error", err),
+			Err: loginTypes.NewInternalError(err.Error(), err),
 		}
 		return
 	}
 
-	logger.Info("user password has been reset",
+	requestLogger.Info("user password has been reset",
 		zap.String("user", session.user),
 		zap.String("deliveryMethod", string(result.CodeDeliveryDetails.DeliveryMedium)),
 		zap.String("destination", *result.CodeDeliveryDetails.Destination),
@@ -1018,6 +1076,10 @@ func processFinalizePasswordResetTask(task finalizePasswordResetTask) {
 		return
 	}
 
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
+	requestLogger.Debug("processing", zap.String("user", task.User))
+
 	input := &cognitoidentityprovider.ConfirmForgotPasswordInput{
 		ClientId:         aws.String(cognitoClientID),
 		Username:         aws.String(task.User),
@@ -1033,12 +1095,12 @@ func processFinalizePasswordResetTask(task finalizePasswordResetTask) {
 
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewInternalError(err.Error(), "internal error", err),
+			Err: loginTypes.NewInternalError(err.Error(), err),
 		}
 		return
 	}
 
-	logger.Info("user finalized password reset",
+	requestLogger.Info("user finalized password reset",
 		zap.String("user", task.User),
 	)
 

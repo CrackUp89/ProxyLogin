@@ -7,12 +7,21 @@ import (
 	"net/http"
 	"proxylogin/internal/manager/login/types"
 	"proxylogin/internal/manager/tools"
+	httpTools "proxylogin/internal/manager/tools/http"
+	"proxylogin/internal/manager/tools/json"
 	"time"
 
 	"go.uber.org/zap"
 )
 
-var logger = tools.NewLogger("CognitoHandlers")
+var handlersLogger *zap.Logger
+
+func getHandlersLogger() *zap.Logger {
+	if handlersLogger == nil {
+		handlersLogger = getLogger().Named("handlers")
+	}
+	return handlersLogger
+}
 
 func newSessionKey() string {
 	return tools.GenerateRandomString(32)
@@ -20,19 +29,53 @@ func newSessionKey() string {
 
 func logTransportError(requestName string, err error) {
 	if err != nil {
-		logger.Error("transport error", zap.String("requestName", requestName), zap.Error(err))
+		getHandlersLogger().Error("transport error", zap.String("requestName", requestName), zap.Error(err))
 	}
+}
+
+func attachRequestLogger(ctx context.Context, requestName string) (context.Context, *zap.Logger) {
+	l := httpTools.GetLoggerWithRequestMetadataFields(getHandlersLogger().With(zap.String("request", requestName)), ctx)
+	return context.WithValue(ctx, "requestLogger", l), l
+}
+
+func getRequestLogger(ctx context.Context) *zap.Logger {
+	v := ctx.Value("requestLogger")
+	l, ok := v.(*zap.Logger)
+	if !ok {
+		logger := getHandlersLogger()
+		logger.Error("context has no logger. using default handler logger")
+		return logger
+	}
+	return l
 }
 
 func processTaskError(w http.ResponseWriter, result TaskResult, ctx context.Context) bool {
 	if result.Err != nil {
-		zapFields := []zap.Field{zap.String("error", result.Err.Error()), zap.Int("code", result.Err.Code())}
-		requestMetadata, ok := tools.GetRequestMetadataFromContext(ctx)
-		if ok {
-			zapFields = append(zapFields, requestMetadata.GetZapFields()...)
+		requestLogger := getRequestLogger(ctx)
+		var internalError *types.InternalError
+		if errors.As(result.Err, &internalError) || errors.Is(result.Err, NoChallengeOrAuthenticationResultError) || errors.Is(result.Err, InconclusiveResponseError) {
+			requestLogger.Error("internal error", zap.Error(result.Err), zap.String("privateError", result.Err.PrivateError()))
+			logTransportError("task response error handler", httpTools.WriteInternalServiceError(w, result.Err))
+			return false
 		}
-		logger.Warn(result.Err.PrivateError(), zapFields...)
-		logTransportError("task response", tools.HTTPWriteBadRequest(w, result.Err))
+
+		var badRequestError *types.BadRequestError
+		var nextStepError *NextStepError
+		if errors.As(result.Err, &badRequestError) || errors.As(result.Err, &nextStepError) {
+			requestLogger.Warn("bad request", zap.Error(result.Err), zap.String("privateError", result.Err.PrivateError()))
+			logTransportError("task response error handler", httpTools.WriteInternalServiceError(w, result.Err))
+			return false
+		}
+
+		var authError *types.GenericAuthenticationError
+		if errors.As(result.Err, &authError) {
+			requestLogger.Warn("authentication error", zap.Error(result.Err), zap.String("privateError", result.Err.PrivateError()))
+			logTransportError("task response error handler", httpTools.WriteUnauthorized(w, result.Err))
+			return false
+		}
+
+		requestLogger.Warn("unknown error", zap.Error(result.Err), zap.String("privateError", result.Err.PrivateError()))
+		logTransportError("task response error handler", httpTools.WriteInternalServiceError(w, result.Err))
 		return false
 	}
 
@@ -44,7 +87,7 @@ func processTaskResponse(w http.ResponseWriter, result TaskResult, ctx context.C
 		return
 	}
 
-	logTransportError("task response", tools.HTTPWriteJSON(w, NextStepResponse{
+	logTransportError("task response", httpTools.WriteJSON(w, NextStepResponse{
 		NextStep: result.NextStep,
 		Session:  result.SessionKey,
 		Payload:  result.Payload,
@@ -52,18 +95,23 @@ func processTaskResponse(w http.ResponseWriter, result TaskResult, ctx context.C
 }
 
 func decodeAndValidate[T WithValidation](w http.ResponseWriter, r *http.Request, componentName string) (T, bool) {
-	value, err := tools.DecodeJSON[T](r)
+	value, err := json.DecodeJSON[T](r)
 	if err != nil {
-		logTransportError(componentName, tools.HTTPWriteBadRequest(w, err))
+		logTransportError(componentName, httpTools.WriteBadRequest(w, err))
 		return value, false
 	}
 
 	if issues := value.Validate(); len(issues) > 0 {
-		logTransportError(componentName, tools.HTTPWriteBadRequest(w, types.NewValidationError(issues)))
+		logTransportError(componentName, httpTools.WriteBadRequest(w, types.NewValidationError(issues)))
 		return value, false
 	}
 
 	return value, true
+}
+
+func attachLoggerContextToRequest(r *http.Request, requestName string) *http.Request {
+	ctx, _ := attachRequestLogger(r.Context(), requestName)
+	return r.WithContext(ctx)
 }
 
 func createLogin() http.Handler {
@@ -73,22 +121,24 @@ func createLogin() http.Handler {
 			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 			defer cancel()
 
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			value, ok := decodeAndValidate[loginRequest](w, r, requestName)
 			if !ok {
 				return
 			}
 
-			trc, err := AddLoginTask(ctx, newSessionKey(), value.User, value.Password)
+			trc, err := AddLoginTask(r.Context(), newSessionKey(), value.User, value.Password)
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
 			taskResult := <-trc
 
 			if errors.Is(taskResult.Err, types.InvalidUserOrPasswordError) {
-				logTransportError(requestName, tools.HTTPWriteUnauthorized(w, fmt.Errorf("invalid user or password")))
+				logTransportError(requestName, httpTools.WriteUnauthorized(w, fmt.Errorf("invalid user or password")))
 				return
 			}
 
@@ -103,15 +153,17 @@ func createMFASetup() http.Handler {
 			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 			defer cancel()
 
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			value, ok := decodeAndValidate[mfaSetupRequest](w, r, requestName)
 			if !ok {
 				return
 			}
 
-			trc, err := AddMFASetupTask(ctx, value.Session, value.User, types.MFAType(value.MFAType))
+			trc, err := AddMFASetupTask(r.Context(), value.Session, value.User, types.MFAType(value.MFAType))
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
@@ -126,22 +178,24 @@ func createMFASetupVerifySoftwareToken() http.Handler {
 			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 			defer cancel()
 
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			value, ok := decodeAndValidate[mfaSetupVerifySoftwareTokenRequest](w, r, requestName)
 			if !ok {
 				return
 			}
 
-			trc, err := AddMFASetupVerifySoftwareTokenTask(ctx, value.Session, value.User, value.Code)
+			trc, err := AddMFASetupVerifySoftwareTokenTask(r.Context(), value.Session, value.User, value.Code)
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
 			taskResult := <-trc
 
 			if errors.Is(taskResult.Err, types.InvalidMFASetupSoftwareTokenError) {
-				logTransportError(requestName, tools.HTTPWriteUnauthorized(w, fmt.Errorf("invalid mfa code")))
+				logTransportError(requestName, httpTools.WriteUnauthorized(w, fmt.Errorf("invalid mfa code")))
 				return
 			}
 
@@ -156,22 +210,24 @@ func createMFAVerify() http.Handler {
 			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 			defer cancel()
 
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			value, ok := decodeAndValidate[mfaSoftwareTokenVerifyRequest](w, r, requestName)
 			if !ok {
 				return
 			}
 
-			trc, err := AddMFAVerifyTask(ctx, value.Session, value.User, value.Code)
+			trc, err := AddMFAVerifyTask(r.Context(), value.Session, value.User, value.Code)
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
 			taskResult := <-trc
 
 			if errors.Is(taskResult.Err, types.InvalidMFACodeError) {
-				logTransportError(requestName, tools.HTTPWriteUnauthorized(w, fmt.Errorf("invalid mfa code")))
+				logTransportError(requestName, httpTools.WriteUnauthorized(w, fmt.Errorf("invalid mfa code")))
 				return
 			}
 
@@ -186,15 +242,17 @@ func createRefreshToken() http.Handler {
 			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 			defer cancel()
 
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			value, ok := decodeAndValidate[refreshTokenRequest](w, r, requestName)
 			if !ok {
 				return
 			}
 
-			trc, err := AddRefreshTokenTask(ctx, "", value.User, value.Token)
+			trc, err := AddRefreshTokenTask(r.Context(), "", value.User, value.Token)
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
@@ -211,10 +269,12 @@ func createLogOut() http.Handler {
 				return
 			}
 
+			r = attachLoggerContextToRequest(r.WithContext(r.Context()), requestName)
+
 			trc, err := AddLogOutTask(r.Context(), "", value.Token)
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
@@ -226,6 +286,12 @@ func createSatisfyPasswordUpdateRequest() http.Handler {
 	requestName := "satisfy password update request"
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+
+			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+			defer cancel()
+
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			value, ok := decodeAndValidate[satisfyPasswordUpdateRequest](w, r, requestName)
 			if !ok {
 				return
@@ -233,7 +299,7 @@ func createSatisfyPasswordUpdateRequest() http.Handler {
 			trc, err := AddSatisfyPasswordUpdateRequestTask(r.Context(), value.Session, value.User, value.Password, value.Attributes)
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
@@ -247,6 +313,11 @@ func createUpdatePasswordRequest() http.Handler {
 	requestName := "update password"
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+			defer cancel()
+
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			value, ok := decodeAndValidate[updatePasswordRequest](w, r, requestName)
 			if !ok {
 				return
@@ -254,7 +325,7 @@ func createUpdatePasswordRequest() http.Handler {
 			trc, err := AddUpdatePasswordTask(r.Context(), value.AccessToken, value.CurrentPassword, value.NewPassword)
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
@@ -268,17 +339,20 @@ func createGetMFAStatus() http.Handler {
 	requestName := "get MFA status"
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+			defer cancel()
+
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			value, ok := decodeAndValidate[getMFAStatusRequest](w, r, requestName)
 			if !ok {
 				return
 			}
 
-			ctx := r.Context()
-
-			trc, err := AddGetMFAStatusTask(ctx, value.AccessToken)
+			trc, err := AddGetMFAStatusTask(r.Context(), value.AccessToken)
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
@@ -292,6 +366,11 @@ func createUpdateMFA() http.Handler {
 	requestName := "update MFA"
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+			defer cancel()
+
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			value, ok := decodeAndValidate[updateMFARequest](w, r, requestName)
 			if !ok {
 				return
@@ -299,7 +378,7 @@ func createUpdateMFA() http.Handler {
 			trc, err := AddUpdateMFATask(r.Context(), newSessionKey(), value.AccessToken, value.MFAType)
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
@@ -313,6 +392,11 @@ func createVerifyUpdateMFA() http.Handler {
 	requestName := "verify MFA update"
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+			defer cancel()
+
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			value, ok := decodeAndValidate[verifyMFAUpdateRequest](w, r, requestName)
 			if !ok {
 				return
@@ -320,7 +404,7 @@ func createVerifyUpdateMFA() http.Handler {
 			trc, err := AddVerifyMFAUpdateTask(r.Context(), value.Session, value.AccessToken, value.Code)
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
@@ -334,6 +418,11 @@ func createSelectMFA() http.Handler {
 	requestName := "select MFA"
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+			defer cancel()
+
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			value, ok := decodeAndValidate[selectMFARequest](w, r, requestName)
 			if !ok {
 				return
@@ -341,7 +430,7 @@ func createSelectMFA() http.Handler {
 			trc, err := AddSelectMFATask(r.Context(), value.Session, value.User, value.MFAType)
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
@@ -355,6 +444,11 @@ func createInitiatePasswordResetRequest() http.Handler {
 	requestName := "initiate password reset request"
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+			defer cancel()
+
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			value, ok := decodeAndValidate[initiatePasswordResetRequest](w, r, requestName)
 			if !ok {
 				return
@@ -362,7 +456,7 @@ func createInitiatePasswordResetRequest() http.Handler {
 			trc, err := AddInitiatePasswordResetTask(r.Context(), value.Email)
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
@@ -376,17 +470,22 @@ func createResetPasswordRequest() http.Handler {
 	requestName := "reset password request"
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+			defer cancel()
+
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			token := passwordResetToken(r.URL.Query().Get("token"))
 
 			if issues := token.Validate(); len(issues) > 0 {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, types.NewValidationError(issues)))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, types.NewValidationError(issues)))
 				return
 			}
 
 			trc, err := AddResetPasswordTask(r.Context(), string(token))
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
@@ -404,6 +503,11 @@ func createFinalizePasswordResetRequest() http.Handler {
 	requestName := "initiate password reset request"
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+			defer cancel()
+
+			r = attachLoggerContextToRequest(r.WithContext(ctx), requestName)
+
 			value, ok := decodeAndValidate[finalizePasswordResetRequest](w, r, requestName)
 			if !ok {
 				return
@@ -411,7 +515,7 @@ func createFinalizePasswordResetRequest() http.Handler {
 			trc, err := AddFinalizePasswordResetTask(r.Context(), value.User, value.Code, value.Password)
 
 			if err != nil {
-				logTransportError(requestName, tools.HTTPWriteBadRequest(w, err))
+				logTransportError(requestName, httpTools.WriteBadRequest(w, err))
 				return
 			}
 
@@ -421,25 +525,25 @@ func createFinalizePasswordResetRequest() http.Handler {
 		})
 }
 
-func defaultRequestSizeLimit(h http.Handler) http.Handler {
-	return tools.MaxRequestSizeLimiterMiddleware(h, 10*1024)
+func withDefaultRequestSizeLimit(h http.Handler) http.Handler {
+	return httpTools.MaxRequestSizeLimiterMiddleware(h, 10*1024)
 }
 
 func AddRoutes(mux *http.ServeMux) *http.ServeMux {
-	mux.Handle("POST /v1/login", defaultRequestSizeLimit(createLogin()))
-	mux.Handle("POST /v1/login/password/update", defaultRequestSizeLimit(createSatisfyPasswordUpdateRequest()))
-	mux.Handle("POST /v1/login/mfa/select", defaultRequestSizeLimit(createSelectMFA()))
-	mux.Handle("POST /v1/login/mfa/setup", defaultRequestSizeLimit(createMFASetup()))
-	mux.Handle("POST /v1/login/mfa/setup/verify", defaultRequestSizeLimit(createMFASetupVerifySoftwareToken()))
-	mux.Handle("POST /v1/login/mfa/verify", defaultRequestSizeLimit(createMFAVerify()))
-	mux.Handle("POST /v1/refresh", defaultRequestSizeLimit(createRefreshToken()))
-	mux.Handle("POST /v1/logout", defaultRequestSizeLimit(createLogOut()))
-	mux.Handle("POST /v1/password/update", defaultRequestSizeLimit(createUpdatePasswordRequest()))
-	mux.Handle("GET /v1/password/reset", defaultRequestSizeLimit(createResetPasswordRequest()))
-	mux.Handle("POST /v1/password/reset/request", defaultRequestSizeLimit(createInitiatePasswordResetRequest()))
-	mux.Handle("POST /v1/password/reset/finalize", defaultRequestSizeLimit(createFinalizePasswordResetRequest()))
-	mux.Handle("POST /v1/mfa/status", defaultRequestSizeLimit(createGetMFAStatus()))
-	mux.Handle("POST /v1/mfa/update", defaultRequestSizeLimit(createUpdateMFA()))
-	mux.Handle("POST /v1/mfa/update/verify", defaultRequestSizeLimit(createVerifyUpdateMFA()))
+	mux.Handle("POST /v1/login", withDefaultRequestSizeLimit(createLogin()))
+	mux.Handle("POST /v1/login/password/update", withDefaultRequestSizeLimit(createSatisfyPasswordUpdateRequest()))
+	mux.Handle("POST /v1/login/mfa/select", withDefaultRequestSizeLimit(createSelectMFA()))
+	mux.Handle("POST /v1/login/mfa/setup", withDefaultRequestSizeLimit(createMFASetup()))
+	mux.Handle("POST /v1/login/mfa/setup/verify", withDefaultRequestSizeLimit(createMFASetupVerifySoftwareToken()))
+	mux.Handle("POST /v1/login/mfa/verify", withDefaultRequestSizeLimit(createMFAVerify()))
+	mux.Handle("POST /v1/refresh", withDefaultRequestSizeLimit(createRefreshToken()))
+	mux.Handle("POST /v1/logout", withDefaultRequestSizeLimit(createLogOut()))
+	mux.Handle("POST /v1/password/update", withDefaultRequestSizeLimit(createUpdatePasswordRequest()))
+	mux.Handle("GET /v1/password/reset", withDefaultRequestSizeLimit(createResetPasswordRequest()))
+	mux.Handle("POST /v1/password/reset/request", withDefaultRequestSizeLimit(createInitiatePasswordResetRequest()))
+	mux.Handle("POST /v1/password/reset/finalize", withDefaultRequestSizeLimit(createFinalizePasswordResetRequest()))
+	mux.Handle("POST /v1/mfa/status", withDefaultRequestSizeLimit(createGetMFAStatus()))
+	mux.Handle("POST /v1/mfa/update", withDefaultRequestSizeLimit(createUpdateMFA()))
+	mux.Handle("POST /v1/mfa/update/verify", withDefaultRequestSizeLimit(createVerifyUpdateMFA()))
 	return mux
 }

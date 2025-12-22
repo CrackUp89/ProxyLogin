@@ -14,7 +14,6 @@ type GenericError interface {
 
 type InternalError struct {
 	privateMessage string
-	message        string
 	originalError  error
 }
 
@@ -23,15 +22,19 @@ func (e *InternalError) Code() int {
 }
 
 func (e *InternalError) Error() string {
-	return e.message
+	return "internal error"
 }
 
 func (e *InternalError) PrivateError() string {
 	return e.privateMessage
 }
 
-func NewInternalError(privateMessage string, publicMessage string, originalError error) *InternalError {
-	return &InternalError{privateMessage, publicMessage, originalError}
+func NewInternalError(privateMessage string, originalError error) *InternalError {
+	return &InternalError{privateMessage, originalError}
+}
+
+func WrapWithInternalError(err error) *InternalError {
+	return &InternalError{err.Error(), err}
 }
 
 type GenericAuthenticationError struct {
@@ -54,6 +57,28 @@ func (e *GenericAuthenticationError) PrivateError() string {
 
 func NewGenericAuthenticationError(privateMessage string, publicMessage string, originalError error) *GenericAuthenticationError {
 	return &GenericAuthenticationError{privateMessage, publicMessage, originalError}
+}
+
+type BadRequestError struct {
+	privateMessage string
+	message        string
+	originalError  error
+}
+
+func (e *BadRequestError) Code() int {
+	return 1001
+}
+
+func (e *BadRequestError) Error() string {
+	return e.message
+}
+
+func (e *BadRequestError) PrivateError() string {
+	return e.privateMessage
+}
+
+func NewBadRequestError(privateMessage string, publicMessage string, originalError error) *BadRequestError {
+	return &BadRequestError{privateMessage, publicMessage, originalError}
 }
 
 type LoginSessionExpiredOrDoesNotExistError struct{}

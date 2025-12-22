@@ -8,9 +8,10 @@ import (
 	"os/signal"
 	"proxylogin/internal/manager/common"
 	"proxylogin/internal/manager/config"
+	"proxylogin/internal/manager/logging"
 	"proxylogin/internal/manager/login/cognito"
 	"proxylogin/internal/manager/login/passwordreset"
-	"proxylogin/internal/manager/tools"
+	httpTools "proxylogin/internal/manager/tools/http"
 	"syscall"
 	"time"
 
@@ -18,7 +19,14 @@ import (
 	"go.uber.org/zap"
 )
 
-var logger = tools.NewLogger("server")
+var serverLogger *zap.Logger
+
+func getLogger() *zap.Logger {
+	if serverLogger == nil {
+		serverLogger = logging.NewLogger("server")
+	}
+	return serverLogger
+}
 
 func init() {
 	viper.SetDefault("http.address", "")
@@ -30,10 +38,13 @@ func init() {
 }
 
 func Run() error {
+	logging.LoadConfig()
+
+	logger := getLogger()
+
 	config.LoadConfig()
 
 	var err error
-
 	passwordreset.LoadConfig()
 
 	mux := http.NewServeMux()
@@ -50,12 +61,13 @@ func Run() error {
 	var handler http.Handler
 	handler = mux
 
+	handler = httpTools.WithAutoRecoverMiddleware(handler)
+
 	if viper.GetBool("http.cors.enabled") {
 		handler = withCORSMiddleware(handler)
 	}
 
-	handler = tools.WithAutoRecoverMiddleware(handler)
-	handler = tools.WithRequestMetadataContextMiddleware(handler)
+	handler = httpTools.WithRequestMetadataContextMiddleware(handler)
 
 	//rt := tools.RequestTracker{}
 	//handler = rt.RequestTrackerMiddleware(handler)

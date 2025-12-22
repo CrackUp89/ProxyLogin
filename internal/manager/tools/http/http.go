@@ -1,18 +1,28 @@
-package tools
+package http
 
 import (
 	"context"
 	"errors"
 	"net/http"
+	"proxylogin/internal/manager/logging"
 	"proxylogin/internal/manager/login/types"
+	"proxylogin/internal/manager/tools/json"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
-var logger = NewLogger("HTTPTools")
+var httpToolsLogger *zap.Logger
+
+func getLogger() *zap.Logger {
+	if httpToolsLogger == nil {
+		httpToolsLogger = logging.NewLogger("httpTools")
+	}
+	return httpToolsLogger
+}
 
 type ErrorResponse struct {
 	Code    int    `json:"code"`
@@ -23,7 +33,7 @@ func NewErrorResponse(code int, message string) ErrorResponse {
 	return ErrorResponse{Code: code, Message: message}
 }
 
-func HTTPWriteBadRequest(w http.ResponseWriter, err error) error {
+func WriteBadRequest(w http.ResponseWriter, err error) error {
 	var msg string
 	code := -1
 	if err != nil {
@@ -36,10 +46,10 @@ func HTTPWriteBadRequest(w http.ResponseWriter, err error) error {
 		msg = "Bad Request"
 	}
 
-	return EncodeJSON(w, http.StatusBadRequest, NewErrorResponse(code, msg))
+	return json.EncodeJSON(w, http.StatusBadRequest, NewErrorResponse(code, msg))
 }
 
-func HTTPWriteInternalServiceError(w http.ResponseWriter, err error) error {
+func WriteInternalServiceError(w http.ResponseWriter, err error) error {
 	var msg string
 	if err != nil {
 		msg = err.Error()
@@ -47,10 +57,10 @@ func HTTPWriteInternalServiceError(w http.ResponseWriter, err error) error {
 		msg = "Internal service error"
 	}
 
-	return EncodeJSON(w, http.StatusInternalServerError, NewErrorResponse(http.StatusInternalServerError, msg))
+	return json.EncodeJSON(w, http.StatusInternalServerError, NewErrorResponse(http.StatusInternalServerError, msg))
 }
 
-func HTTPWriteUnauthorized(w http.ResponseWriter, err error) error {
+func WriteUnauthorized(w http.ResponseWriter, err error) error {
 	var msg string
 	if err != nil {
 		msg = err.Error()
@@ -58,16 +68,16 @@ func HTTPWriteUnauthorized(w http.ResponseWriter, err error) error {
 		msg = "Unauthorized"
 	}
 
-	return EncodeJSON(w, http.StatusUnauthorized, NewErrorResponse(http.StatusUnauthorized, msg))
+	return json.EncodeJSON(w, http.StatusUnauthorized, NewErrorResponse(http.StatusUnauthorized, msg))
 }
 
-func HTTPWriteJSON(w http.ResponseWriter, data interface{}) error {
+func WriteJSON(w http.ResponseWriter, data interface{}) error {
 	if data == nil {
 		w.WriteHeader(http.StatusOK)
 		return nil
 	} else {
-		if EncodeJSON(w, http.StatusOK, data) != nil {
-			return HTTPWriteInternalServiceError(w, nil)
+		if json.EncodeJSON(w, http.StatusOK, data) != nil {
+			return WriteInternalServiceError(w, nil)
 		}
 	}
 	return nil
@@ -87,15 +97,17 @@ func WithAutoRecoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
-				logger.Error("handler panicked", zap.Any("panic", err), zap.Stack("stack"))
+				getLogger().Error("handler panicked", zap.Any("err", err), zap.Stack("stack"))
 				w.WriteHeader(http.StatusInternalServerError)
 			}
 		}()
+
 		next.ServeHTTP(w, r)
 	})
 }
 
 type RequestMetadata struct {
+	ID           string `json:"id"`
 	Host         string `json:"host"`
 	RequestURI   string `json:"uri"`
 	RemoteAddr   string `json:"remote_addr"`
@@ -105,6 +117,7 @@ type RequestMetadata struct {
 
 func (receiver *RequestMetadata) GetZapFields() []zap.Field {
 	return []zap.Field{
+		zap.String("request_id", receiver.ID),
 		zap.String("host", receiver.Host),
 		zap.String("uri", receiver.RequestURI),
 		zap.String("remote_addr", receiver.RemoteAddr),
@@ -113,9 +126,20 @@ func (receiver *RequestMetadata) GetZapFields() []zap.Field {
 	}
 }
 
+func GetLoggerWithRequestMetadataFields(l *zap.Logger, ctx context.Context) *zap.Logger {
+	md, ok := GetRequestMetadataFromContext(ctx)
+	if ok {
+		l = l.WithLazy(md.GetZapFields()...)
+	} else {
+		getLogger().Warn("context has no request metadata")
+	}
+	return l
+}
+
 func WithRequestMetadataContextMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.WithValue(r.Context(), "requestMetadata", RequestMetadata{
+			ID:           uuid.NewString(),
 			Host:         r.Host,
 			RequestURI:   r.RequestURI,
 			RemoteAddr:   r.RemoteAddr,

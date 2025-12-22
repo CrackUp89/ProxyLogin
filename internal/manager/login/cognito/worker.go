@@ -1,12 +1,17 @@
 package cognito
 
 import (
-	"proxylogin/internal/manager/tools"
-
 	"go.uber.org/zap"
 )
 
-var workersLogger = tools.NewLogger("Cognito.Workers")
+var workersLogger *zap.Logger
+
+func getWorkersLogger() *zap.Logger {
+	if workersLogger == nil {
+		workersLogger = getLogger().Named("workers")
+	}
+	return workersLogger
+}
 
 func startWorker() chan bool {
 	stopChannel := make(chan bool)
@@ -71,7 +76,7 @@ func StartWorkers(num uint64) func() {
 	for i := uint64(0); i < num; i++ {
 		stopChannels[i] = startWorker()
 	}
-	workersLogger.Info("Workers started", zap.Uint64("num", num))
+	getWorkersLogger().Info("Workers started", zap.Uint64("num", num))
 	return func() {
 		for _, stopChannel := range stopChannels {
 			stopChannel <- true

@@ -2,6 +2,7 @@ package cognito
 
 import (
 	"context"
+	"proxylogin/internal/manager/logging"
 	loginTypes "proxylogin/internal/manager/login/types"
 	"proxylogin/internal/manager/tools"
 	"time"
@@ -32,6 +33,15 @@ var (
 	stopWorkers              func()
 	stopSessionCleanup       func()
 )
+
+var cognitoLogger *zap.Logger
+
+func getLogger() *zap.Logger {
+	if cognitoLogger == nil {
+		cognitoLogger = logging.NewLogger("cognito")
+	}
+	return cognitoLogger
+}
 
 func init() {
 	viper.SetDefault("cognito.workers", 1000)
@@ -97,7 +107,7 @@ func describeUserPoolClient(client *cognitoidentityprovider.Client, userPoolId, 
 	result, err := client.DescribeUserPoolClient(context.Background(), input)
 
 	if err != nil {
-		logger.Fatal("Failed to describe user pool", zap.Error(err))
+		getLogger().Fatal("Failed to describe user pool", zap.Error(err))
 	}
 	return result.UserPoolClient
 }
@@ -110,7 +120,7 @@ func describeUserPool(client *cognitoidentityprovider.Client, userPoolId string)
 	result, err := client.DescribeUserPool(context.Background(), input)
 
 	if err != nil {
-		logger.Fatal("Failed to describe user pool", zap.Error(err))
+		getLogger().Fatal("Failed to describe user pool", zap.Error(err))
 	}
 
 	return result.UserPool
