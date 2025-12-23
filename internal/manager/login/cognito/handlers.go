@@ -158,6 +158,16 @@ func getRequestMetadataFromContextOrPanic(ctx context.Context) *httpTools.Reques
 	return md
 }
 
+func checkLimiter(limiter ratelimiter.Limiter, key string, w http.ResponseWriter, ctx context.Context) bool {
+	if !limiter.Allow(key) {
+		requestLogger := getRequestLogger(ctx)
+		requestLogger.Warn("rate limit exceeded")
+		logTransportError(httpTools.WriteTooManyRequests(w), ctx)
+		return false
+	}
+	return true
+}
+
 func createLogin() http.Handler {
 	//originLimiter := ratelimiter.NewLimiter(rate.Every(10*time.Millisecond), 100)
 	userLimiter := ratelimiter.NewLimiter(rate.Every(500*time.Millisecond), 1)
@@ -175,12 +185,7 @@ func createLogin() http.Handler {
 			defer cancel()
 
 			value, ok := decodeAndValidate[loginRequest](w, r)
-			if !ok {
-				return
-			}
-
-			if !userLimiter.Allow(value.User) {
-				logTransportError(httpTools.WriteTooManyRequests(w), r.Context())
+			if !ok || !checkLimiter(userLimiter, value.User, w, r.Context()) {
 				return
 			}
 
@@ -226,12 +231,7 @@ func createMFASetupVerifySoftwareToken() http.Handler {
 			defer cancel()
 
 			value, ok := decodeAndValidate[mfaSetupVerifySoftwareTokenRequest](w, r)
-			if !ok {
-				return
-			}
-
-			if !userLimiter.Allow(value.User) {
-				logTransportError(httpTools.WriteTooManyRequests(w), r.Context())
+			if !ok || !checkLimiter(userLimiter, value.User, w, r.Context()) {
 				return
 			}
 
@@ -256,12 +256,7 @@ func createMFAVerify() http.Handler {
 			defer cancel()
 
 			value, ok := decodeAndValidate[mfaSoftwareTokenVerifyRequest](w, r)
-			if !ok {
-				return
-			}
-
-			if !userLimiter.Allow(value.User) {
-				logTransportError(httpTools.WriteTooManyRequests(w), r.Context())
+			if !ok || !checkLimiter(userLimiter, value.User, w, r.Context()) {
 				return
 			}
 
@@ -288,12 +283,7 @@ func createRefreshToken() http.Handler {
 			r = attachLoggerContextToRequest(r)
 
 			value, ok := decodeAndValidate[refreshTokenRequest](w, r)
-			if !ok {
-				return
-			}
-
-			if !userLimiter.Allow(value.User) {
-				logTransportError(httpTools.WriteTooManyRequests(w), r.Context())
+			if !ok || !checkLimiter(userLimiter, value.User, w, r.Context()) {
 				return
 			}
 
@@ -468,12 +458,7 @@ func createInitiatePasswordResetRequest() http.Handler {
 			defer cancel()
 
 			value, ok := decodeAndValidate[initiatePasswordResetRequest](w, r)
-			if !ok {
-				return
-			}
-
-			if !emailLimiter.Allow(value.Email) {
-				logTransportError(httpTools.WriteTooManyRequests(w), r.Context())
+			if !ok || !checkLimiter(emailLimiter, value.Email, w, r.Context()) {
 				return
 			}
 
@@ -526,12 +511,7 @@ func createFinalizePasswordResetRequest() http.Handler {
 			defer cancel()
 
 			value, ok := decodeAndValidate[finalizePasswordResetRequest](w, r)
-			if !ok {
-				return
-			}
-
-			if !userLimiter.Allow(value.User) {
-				logTransportError(httpTools.WriteTooManyRequests(w), r.Context())
+			if !ok || !checkLimiter(userLimiter, value.User, w, r.Context()) {
 				return
 			}
 
