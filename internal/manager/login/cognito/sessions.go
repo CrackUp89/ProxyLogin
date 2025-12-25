@@ -1,12 +1,18 @@
 package cognito
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"proxylogin/internal/manager/rds"
 	"proxylogin/internal/manager/tools"
 	"reflect"
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
 
@@ -19,21 +25,39 @@ func getSessionsLogger() *zap.Logger {
 	return sessionsLogger
 }
 
-type NextStep string
+type SessionStorage interface {
+	GetLoginSession(ctx context.Context, loginSession string) (*LoginSession, error)
+	CreateLoginSession(ctx context.Context, loginSessionKey string, cognitoSession string, nextStep NextStep, expires time.Time, tag interface{}) error
+	GetResetPasswordSession(ctx context.Context, token string) (*InitiateResetPasswordSession, error)
+	CreateResetPasswordSession(ctx context.Context, resetPasswordSessionKey string, user string, email string, expires time.Time) error
+	DropResetPasswordSession(ctx context.Context, token string) error
+}
 
-const (
-	NextStepNone                        NextStep = ""
-	NextStepMFASetup                    NextStep = "mfa_setup"
-	NextStepMFASoftwareTokenSetupVerify NextStep = "mfa_software_token_setup_verify"
-	NextStepMFASelect                   NextStep = "mfa_select"
-	NextStepMFASoftwareTokenVerify      NextStep = "mfa_software_token_verify"
-	NextStepMFAEMailVerify              NextStep = "mfa_email_verify"
-	NextStepMFASMSVerify                NextStep = "mfa_sms_verify"
-	NextStepNewPassword                 NextStep = "new_password"
+var sessionStorage SessionStorage
+
+type storageType string
+
+var (
+	MEMORY storageType = "memory"
+	REDIS  storageType = "redis"
 )
 
-func (s NextStep) String() string {
-	return string(s)
+func init() {
+	viper.SetDefault("cognito.sessions.storage", MEMORY)
+}
+
+func loadSessionSettings() {
+	switch storageType(viper.GetString("cognito.sessions.storage")) {
+	case MEMORY:
+		sessionStorage = NewLocalSessionStore()
+		startLocalStorageCleanupRoutine()
+		break
+	case REDIS:
+		sessionStorage = NewRedisSessionStore()
+		break
+	default:
+		panic("invalid storage type")
+	}
 }
 
 type withValidityTimeframe interface {
@@ -54,15 +78,15 @@ func cleanupExpiredSessions[T withValidityTimeframe](sessions *sync.Map) {
 	})
 }
 
-func StartSessionCleanupRoutine() func() {
+func startLocalStorageCleanupRoutine() func() {
 	stop := make(chan bool, 1)
 	go func() {
 		cleanup := time.NewTicker(15 * time.Second)
 		for {
 			select {
 			case <-cleanup.C:
-				cleanupExpiredSessions[LoginSession](activeLoginSessions)
-				cleanupExpiredSessions[*initiateResetPasswordSession](activeInitiateResetPasswordSessions)
+				cleanupExpiredSessions[LoginSession](sessionStorage.(*LocalSessionStore).activeLoginSessions)
+				cleanupExpiredSessions[*InitiateResetPasswordSession](sessionStorage.(*LocalSessionStore).activeInitiateResetPasswordSessions)
 			case <-stop:
 				getSessionsLogger().Info("Session cleanup routine stopped")
 				return
@@ -88,72 +112,241 @@ func lockLoginSession(sessionKey string) func() {
 }
 
 type LoginSession struct {
-	cognitoSession string
-	created        time.Time
-	expires        time.Time
-	nextStep       NextStep
-	tag            interface{}
+	CognitoSession string      `json:"cognito_session"`
+	Created        time.Time   `json:"created"`
+	Expires        time.Time   `json:"expires"`
+	NextStep       NextStep    `json:"nextStep"`
+	Tag            interface{} `json:"tag"`
 }
 
 func (l LoginSession) GetStartTime() time.Time {
-	return l.created
+	return l.Created
 }
 
 func (l LoginSession) GetExpirationTime() time.Time {
-	return l.expires
+	return l.Expires
 }
 
-var activeLoginSessions = new(sync.Map)
+type InitiateResetPasswordSession struct {
+	User    string    `json:"user"`
+	Email   string    `json:"email"`
+	Created time.Time `json:"created"`
+	Expires time.Time `json:"expires"`
+}
 
-func getLoginSession(loginSession string) (LoginSession, bool) {
-	r, ok := activeLoginSessions.Load(loginSession)
-	if ok && r != nil && r.(LoginSession).created.Before(time.Now()) {
-		return r.(LoginSession), true
+func (l InitiateResetPasswordSession) GetStartTime() time.Time {
+	return l.Created
+}
+
+func (l InitiateResetPasswordSession) GetExpirationTime() time.Time {
+	return l.Expires
+}
+
+type LocalSessionStore struct {
+	activeLoginSessions                 *sync.Map
+	activeInitiateResetPasswordSessions *sync.Map
+}
+
+func (l *LocalSessionStore) DropResetPasswordSession(_ context.Context, token string) error {
+	l.activeInitiateResetPasswordSessions.Delete(token)
+	return nil
+}
+
+func NewLocalSessionStore() *LocalSessionStore {
+	return &LocalSessionStore{
+		activeLoginSessions:                 new(sync.Map),
+		activeInitiateResetPasswordSessions: new(sync.Map),
 	}
-	return LoginSession{}, false
 }
 
-func createLoginSession(loginSessionKey string, cognitoSession string, nextStep NextStep, expires time.Time, tag interface{}) {
-	activeLoginSessions.Store(loginSessionKey,
-		LoginSession{cognitoSession,
+func (l *LocalSessionStore) GetLoginSession(_ context.Context, loginSession string) (*LoginSession, error) {
+	r, ok := l.activeLoginSessions.Load(loginSession)
+	if ok && r != nil && r.(LoginSession).Created.Before(time.Now()) {
+		return r.(*LoginSession), nil
+	}
+	return nil, nil
+}
+
+func (l *LocalSessionStore) CreateLoginSession(_ context.Context, loginSessionKey string, cognitoSession string, nextStep NextStep, expires time.Time, tag interface{}) error {
+	l.activeLoginSessions.Store(loginSessionKey,
+		&LoginSession{cognitoSession,
 			time.Now(),
 			expires,
 			nextStep,
 			tag})
+	return nil
 }
 
-type initiateResetPasswordSession struct {
-	user    string
-	email   string
-	used    bool
-	created time.Time
-	expires time.Time
-}
-
-func (l initiateResetPasswordSession) GetStartTime() time.Time {
-	return l.created
-}
-
-func (l initiateResetPasswordSession) GetExpirationTime() time.Time {
-	return l.expires
-}
-
-var activeInitiateResetPasswordSessions = new(sync.Map)
-
-func getResetPasswordSession(token string) (*initiateResetPasswordSession, bool) {
-	r, ok := activeInitiateResetPasswordSessions.Load(token)
-	if ok && r != nil && r.(*initiateResetPasswordSession).created.Before(time.Now()) {
-		return r.(*initiateResetPasswordSession), true
+func (l *LocalSessionStore) GetResetPasswordSession(_ context.Context, token string) (*InitiateResetPasswordSession, error) {
+	r, ok := l.activeInitiateResetPasswordSessions.Load(token)
+	if ok && r != nil && r.(*InitiateResetPasswordSession).Created.Before(time.Now()) {
+		return r.(*InitiateResetPasswordSession), nil
 	}
-	return nil, false
+	return nil, nil
 }
 
-func createResetPasswordSession(resetPasswordSessionKey string, user string, email string, expires time.Time) {
-	activeInitiateResetPasswordSessions.Store(resetPasswordSessionKey, &initiateResetPasswordSession{
+func (l *LocalSessionStore) CreateResetPasswordSession(_ context.Context, resetPasswordSessionKey string, user string, email string, expires time.Time) error {
+	l.activeInitiateResetPasswordSessions.Store(resetPasswordSessionKey, &InitiateResetPasswordSession{
 		user,
 		email,
-		false,
 		time.Now(),
 		expires,
 	})
+	return nil
+}
+
+type RedisSessionStore struct {
+}
+
+const (
+	loginSessionPrefix         = "cognito:loginSession:"
+	resetPasswordSessionPrefix = "cognito:resetSession:"
+)
+
+func NewRedisSessionStore() *RedisSessionStore {
+	return &RedisSessionStore{}
+}
+
+func (r *RedisSessionStore) GetLoginSession(ctx context.Context, loginSession string) (*LoginSession, error) {
+	key := rds.BuildKey(loginSessionPrefix, loginSession)
+	data, err := rds.GetClient().Get(ctx, key).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, nil
+		}
+		getSessionsLogger().Error("failed to get login session from redis",
+			zap.String("session", loginSession),
+			zap.Error(err))
+		return nil, err
+	}
+
+	var session LoginSession
+	if err := json.Unmarshal([]byte(data), &session); err != nil {
+		getSessionsLogger().Error("failed to unmarshal login session",
+			zap.String("session", loginSession),
+			zap.Error(err))
+		return nil, err
+	}
+
+	if session.Created.Before(time.Now()) && session.Expires.After(time.Now()) {
+		return &session, nil
+	}
+
+	return nil, nil
+}
+
+func (r *RedisSessionStore) CreateLoginSession(ctx context.Context, loginSessionKey string, cognitoSession string, nextStep NextStep, expires time.Time, tag interface{}) error {
+	key := rds.BuildKey(loginSessionPrefix, loginSessionKey)
+	session := &LoginSession{
+		CognitoSession: cognitoSession,
+		Created:        time.Now(),
+		Expires:        expires,
+		NextStep:       nextStep,
+		Tag:            tag,
+	}
+
+	data, err := json.Marshal(session)
+	if err != nil {
+		getSessionsLogger().Error("failed to marshal login session",
+			zap.String("session", loginSessionKey),
+			zap.Error(err))
+		return err
+	}
+
+	ttl := time.Until(expires)
+	if ttl < 0 {
+		ttl = 0
+	}
+
+	if err := rds.GetClient().Set(ctx, key, data, ttl).Err(); err != nil {
+		getSessionsLogger().Error("failed to create login session in redis",
+			zap.String("session", loginSessionKey),
+			zap.Error(err))
+		return err
+	}
+
+	getSessionsLogger().Debug("created login session in redis",
+		zap.String("session", loginSessionKey),
+		zap.Duration("ttl", ttl))
+
+	return nil
+}
+
+func (r *RedisSessionStore) GetResetPasswordSession(ctx context.Context, token string) (*InitiateResetPasswordSession, error) {
+	key := rds.BuildKey(resetPasswordSessionPrefix, token)
+	data, err := rds.GetClient().Get(ctx, key).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, nil
+		}
+		getSessionsLogger().Error("failed to get reset password session from redis",
+			zap.String("token", token),
+			zap.Error(err))
+		return nil, err
+	}
+
+	var session InitiateResetPasswordSession
+	if err := json.Unmarshal([]byte(data), &session); err != nil {
+		getSessionsLogger().Error("failed to unmarshal reset password session",
+			zap.String("token", token),
+			zap.Error(err))
+		return nil, err
+	}
+
+	if session.Created.Before(time.Now()) && session.Expires.After(time.Now()) {
+		return &session, nil
+	}
+
+	return nil, nil
+}
+
+func (r *RedisSessionStore) CreateResetPasswordSession(ctx context.Context, resetPasswordSessionKey string, user string, email string, expires time.Time) error {
+	key := rds.BuildKey(resetPasswordSessionPrefix, resetPasswordSessionKey)
+	session := &InitiateResetPasswordSession{
+		User:    user,
+		Email:   email,
+		Created: time.Now(),
+		Expires: expires,
+	}
+
+	data, err := json.Marshal(session)
+	if err != nil {
+		getSessionsLogger().Error("failed to marshal reset password session",
+			zap.String("token", resetPasswordSessionKey),
+			zap.Error(err))
+		return err
+	}
+
+	ttl := time.Until(expires)
+	if ttl < 0 {
+		ttl = 0
+	}
+
+	if err := rds.GetClient().Set(ctx, key, data, ttl).Err(); err != nil {
+		getSessionsLogger().Error("failed to create reset password session in redis",
+			zap.String("token", resetPasswordSessionKey),
+			zap.Error(err))
+		return err
+	}
+
+	getSessionsLogger().Debug("created reset password session in redis",
+		zap.String("token", resetPasswordSessionKey),
+		zap.Duration("ttl", ttl))
+
+	return nil
+}
+
+func (r *RedisSessionStore) DropResetPasswordSession(ctx context.Context, token string) error {
+	key := rds.BuildKey(resetPasswordSessionPrefix, token)
+	if err := rds.GetClient().Del(ctx, key).Err(); err != nil {
+		getSessionsLogger().Error("failed to delete reset password session from redis",
+			zap.String("token", token),
+			zap.Error(err))
+		return err
+	}
+
+	getSessionsLogger().Debug("dropped reset password session from redis",
+		zap.String("token", token))
+
+	return nil
 }

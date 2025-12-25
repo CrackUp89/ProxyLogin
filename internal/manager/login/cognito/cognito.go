@@ -31,7 +31,6 @@ var (
 	poolClientDescription    *types.UserPoolClientType
 	poolDescription          *types.UserPoolType
 	stopWorkers              func()
-	stopSessionCleanup       func()
 )
 
 var cognitoLogger *zap.Logger
@@ -72,6 +71,7 @@ func loadSettings() error {
 	}
 
 	loadProcessingSettings()
+	loadSessionSettings()
 
 	return nil
 }
@@ -144,7 +144,6 @@ func Start() error {
 	}
 
 	stopWorkers = StartWorkers(viper.GetUint64("cognito.workers"))
-	stopSessionCleanup = StartSessionCleanupRoutine()
 
 	return nil
 }
@@ -152,8 +151,5 @@ func Start() error {
 func Stop() {
 	if stopWorkers != nil {
 		stopWorkers()
-	}
-	if stopSessionCleanup != nil {
-		stopSessionCleanup()
 	}
 }

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"golang.org/x/time/rate"
 )
 
 var handlersLogger *zap.Logger
@@ -126,13 +125,13 @@ func decodeAndValidate[T WithValidation](w http.ResponseWriter, r *http.Request)
 	value, err := json.DecodeJSON[T](r)
 
 	if err != nil {
-		requestLogger.Warn("JSON decode error", zap.Error(err))
+		requestLogger.Warn("malformed JSON", zap.Error(err))
 		logTransportError(httpTools.WriteBadRequest(w, err), ctx)
 		return value, false
 	}
 
 	if issues := value.Validate(); len(issues) > 0 {
-		requestLogger.Warn("JSON validation error", zap.Error(err))
+		requestLogger.Warn("invalid request params", zap.Error(err))
 		logTransportError(httpTools.WriteBadRequest(w, types.NewValidationError(issues)), r.Context())
 		return value, false
 	}
@@ -158,19 +157,21 @@ func getRequestMetadataFromContextOrPanic(ctx context.Context) *httpTools.Reques
 	return md
 }
 
-func checkLimiter(limiter ratelimiter.Limiter, key string, w http.ResponseWriter, ctx context.Context) bool {
-	if !limiter.Allow(key) {
+func processLimiter(limiter ratelimiter.Limiter, key string, w http.ResponseWriter, ctx context.Context) (bool, error) {
+	if allow, err := limiter.Allow(ctx, key); err != nil {
+		return allow, err
+	} else if !allow {
 		requestLogger := getRequestLogger(ctx)
 		requestLogger.Warn("rate limit exceeded")
 		logTransportError(httpTools.WriteTooManyRequests(w), ctx)
-		return false
+		return false, nil
 	}
-	return true
+	return true, nil
 }
 
 func createLogin() http.Handler {
 	//originLimiter := ratelimiter.NewLimiter(rate.Every(10*time.Millisecond), 100)
-	userLimiter := ratelimiter.NewLimiter(rate.Every(500*time.Millisecond), 1)
+	userLimiter := ratelimiter.NewLimiter("createLoginUser", 2, time.Second)
 
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -185,7 +186,15 @@ func createLogin() http.Handler {
 			defer cancel()
 
 			value, ok := decodeAndValidate[loginRequest](w, r)
-			if !ok || !checkLimiter(userLimiter, value.User, w, r.Context()) {
+			if !ok {
+				return
+			}
+
+			if allowed, err := processLimiter(userLimiter, value.User, w, r.Context()); err != nil {
+				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
+					return
+				}
+			} else if !allowed {
 				return
 			}
 
@@ -223,7 +232,7 @@ func createMFASetup() http.Handler {
 }
 
 func createMFASetupVerifySoftwareToken() http.Handler {
-	userLimiter := ratelimiter.NewLimiter(rate.Every(500*time.Millisecond), 1)
+	userLimiter := ratelimiter.NewLimiter("createMFASetupVerifySoftwareTokenUser", 5, time.Second)
 
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -231,7 +240,15 @@ func createMFASetupVerifySoftwareToken() http.Handler {
 			defer cancel()
 
 			value, ok := decodeAndValidate[mfaSetupVerifySoftwareTokenRequest](w, r)
-			if !ok || !checkLimiter(userLimiter, value.User, w, r.Context()) {
+			if !ok {
+				return
+			}
+
+			if allowed, err := processLimiter(userLimiter, value.User, w, r.Context()); err != nil {
+				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
+					return
+				}
+			} else if !allowed {
 				return
 			}
 
@@ -248,7 +265,7 @@ func createMFASetupVerifySoftwareToken() http.Handler {
 }
 
 func createMFAVerify() http.Handler {
-	userLimiter := ratelimiter.NewLimiter(rate.Every(500*time.Millisecond), 1)
+	userLimiter := ratelimiter.NewLimiter("createMFAVerifyUser", 5, time.Second)
 
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -256,7 +273,15 @@ func createMFAVerify() http.Handler {
 			defer cancel()
 
 			value, ok := decodeAndValidate[mfaSoftwareTokenVerifyRequest](w, r)
-			if !ok || !checkLimiter(userLimiter, value.User, w, r.Context()) {
+			if !ok {
+				return
+			}
+
+			if allowed, err := processLimiter(userLimiter, value.User, w, r.Context()); err != nil {
+				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
+					return
+				}
+			} else if !allowed {
 				return
 			}
 
@@ -273,7 +298,7 @@ func createMFAVerify() http.Handler {
 }
 
 func createRefreshToken() http.Handler {
-	userLimiter := ratelimiter.NewLimiter(rate.Every(500*time.Millisecond), 10)
+	userLimiter := ratelimiter.NewLimiter("createRefreshTokenUser", 5, time.Second)
 
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -283,7 +308,15 @@ func createRefreshToken() http.Handler {
 			r = attachLoggerContextToRequest(r)
 
 			value, ok := decodeAndValidate[refreshTokenRequest](w, r)
-			if !ok || !checkLimiter(userLimiter, value.User, w, r.Context()) {
+			if !ok {
+				return
+			}
+
+			if allowed, err := processLimiter(userLimiter, value.User, w, r.Context()); err != nil {
+				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
+					return
+				}
+			} else if !allowed {
 				return
 			}
 
@@ -450,7 +483,7 @@ func createSelectMFA() http.Handler {
 }
 
 func createInitiatePasswordResetRequest() http.Handler {
-	emailLimiter := ratelimiter.NewLimiter(rate.Every(1*time.Minute), 1)
+	emailLimiter := ratelimiter.NewLimiter("createInitiatePasswordResetRequestEmail", 1, 5*time.Minute)
 
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -458,7 +491,15 @@ func createInitiatePasswordResetRequest() http.Handler {
 			defer cancel()
 
 			value, ok := decodeAndValidate[initiatePasswordResetRequest](w, r)
-			if !ok || !checkLimiter(emailLimiter, value.Email, w, r.Context()) {
+			if !ok {
+				return
+			}
+
+			if allowed, err := processLimiter(emailLimiter, value.Email, w, r.Context()); err != nil {
+				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
+					return
+				}
+			} else if !allowed {
 				return
 			}
 
@@ -504,14 +545,22 @@ func createResetPasswordRequest() http.Handler {
 }
 
 func createFinalizePasswordResetRequest() http.Handler {
-	userLimiter := ratelimiter.NewLimiter(rate.Every(500*time.Millisecond), 10)
+	userLimiter := ratelimiter.NewLimiter("createFinalizePasswordResetRequestUser", 5, time.Second)
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
 			value, ok := decodeAndValidate[finalizePasswordResetRequest](w, r)
-			if !ok || !checkLimiter(userLimiter, value.User, w, r.Context()) {
+			if !ok {
+				return
+			}
+
+			if allowed, err := processLimiter(userLimiter, value.User, w, r.Context()); err != nil {
+				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
+					return
+				}
+			} else if !allowed {
 				return
 			}
 

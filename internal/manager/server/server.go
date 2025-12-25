@@ -11,7 +11,9 @@ import (
 	"proxylogin/internal/manager/logging"
 	"proxylogin/internal/manager/login/cognito"
 	"proxylogin/internal/manager/login/passwordreset"
+	"proxylogin/internal/manager/rds"
 	httpTools "proxylogin/internal/manager/tools/http"
+	"proxylogin/internal/manager/tools/ratelimiter"
 	"syscall"
 	"time"
 
@@ -43,6 +45,8 @@ func Run() error {
 	logger := getLogger()
 
 	config.LoadConfig()
+	rds.LoadConfig()
+	ratelimiter.LoadConfig()
 
 	var err error
 	passwordreset.LoadConfig()

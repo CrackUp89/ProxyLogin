@@ -12,6 +12,23 @@ var (
 	RefreshMethodToken RefreshMethod = "token"
 )
 
+type NextStep string
+
+const (
+	NextStepNone                        NextStep = ""
+	NextStepMFASetup                    NextStep = "mfa_setup"
+	NextStepMFASoftwareTokenSetupVerify NextStep = "mfa_software_token_setup_verify"
+	NextStepMFASelect                   NextStep = "mfa_select"
+	NextStepMFASoftwareTokenVerify      NextStep = "mfa_software_token_verify"
+	NextStepMFAEMailVerify              NextStep = "mfa_email_verify"
+	NextStepMFASMSVerify                NextStep = "mfa_sms_verify"
+	NextStepNewPassword                 NextStep = "new_password"
+)
+
+func (s NextStep) String() string {
+	return string(s)
+}
+
 type NextStepResponse struct {
 	NextStep NextStep    `json:"next_step,omitempty"`
 	Session  string      `json:"session,omitempty"`

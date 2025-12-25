@@ -128,26 +128,38 @@ func handleChallenge(challenge cognitoTypes.ChallengeNameType, challengeParamete
 		return
 	}
 
-	createLoginSession(task.SessionKey, cognitoSessions, nextStep, time.Now().Add(loginSessionValidFor), sessionTag)
+	if err := sessionStorage.CreateLoginSession(task.Context, task.SessionKey, cognitoSessions, nextStep, time.Now().Add(loginSessionValidFor), sessionTag); err != nil {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewInternalError("failed to create login session", err),
+		}
+		return
+	}
+
 	tr.NextStep = nextStep
 	task.ResultChan <- tr
 }
 
-func getTaskSession(t Task) (LoginSession, bool) {
-	session, ok := getLoginSession(t.SessionKey)
-	if !ok {
+func getLoginSession(t Task) *LoginSession {
+	session, err := sessionStorage.GetLoginSession(t.Context, t.SessionKey)
+	if err != nil {
+		t.ResultChan <- TaskResult{
+			Err: loginTypes.NewInternalError("failed to retrieve login session", err),
+		}
+		return nil
+	}
+	if session == nil {
 		t.ResultChan <- TaskResult{
 			Err: loginTypes.NewLoginSessionExpiredOrDoesNotExistError(),
 		}
-		return session, false
+		return nil
 	}
-	return session, true
+	return session
 }
 
-func checkNextStep(t Task, s LoginSession, expectedStep NextStep) bool {
-	if s.nextStep != expectedStep {
+func checkNextStep(t Task, s *LoginSession, expectedStep NextStep) bool {
+	if s.NextStep != expectedStep {
 		t.ResultChan <- TaskResult{
-			Err: loginTypes.NewBadRequestError(fmt.Sprintf("unexpected next step: %s; expected: %s", s.nextStep, expectedStep), "unexpected next step", nil),
+			Err: loginTypes.NewBadRequestError(fmt.Sprintf("unexpected next step: %s; expected: %s", s.NextStep, expectedStep), "unexpected next step", nil),
 		}
 		return false
 	}
@@ -257,18 +269,17 @@ func processMFASetupTask(task mfaSetupTask) {
 
 	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
-	var session LoginSession
-	if s, ok := getTaskSession(task.Task); !ok || !checkNextStep(task.Task, s, NextStepMFASetup) {
+	session := getLoginSession(task.Task)
+
+	if session == nil || !checkNextStep(task.Task, session, NextStepMFASetup) {
 		return
-	} else {
-		session = s
 	}
 
 	switch task.MFAType {
 	case loginTypes.MFATypeSoftwareToken:
 
 		associateInput := &cognitoidentityprovider.AssociateSoftwareTokenInput{
-			Session: &session.cognitoSession,
+			Session: aws.String(session.CognitoSession),
 		}
 
 		associateResult, err := cognitoClient.AssociateSoftwareToken(task.Context, associateInput)
@@ -279,7 +290,13 @@ func processMFASetupTask(task mfaSetupTask) {
 			return
 		}
 
-		createLoginSession(task.SessionKey, *associateResult.Session, NextStepMFASoftwareTokenSetupVerify, time.Now().Add(loginSessionValidFor), nil)
+		if err := sessionStorage.CreateLoginSession(task.Context, task.SessionKey, *associateResult.Session, NextStepMFASoftwareTokenSetupVerify, time.Now().Add(loginSessionValidFor), nil); err != nil {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.NewInternalError("failed to create login session", err),
+			}
+			return
+		}
+
 		task.ResultChan <- TaskResult{
 			NextStep:   NextStepMFASoftwareTokenSetupVerify,
 			SessionKey: task.SessionKey,
@@ -305,15 +322,13 @@ func processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoftwareTokenTask
 
 	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
-	var session LoginSession
-	if s, ok := getTaskSession(task.Task); !ok || !checkNextStep(task.Task, s, NextStepMFASoftwareTokenSetupVerify) {
+	session := getLoginSession(task.Task)
+	if session == nil || !checkNextStep(task.Task, session, NextStepMFASoftwareTokenSetupVerify) {
 		return
-	} else {
-		session = s
 	}
 
 	verifyInput := &cognitoidentityprovider.VerifySoftwareTokenInput{
-		Session:  &session.cognitoSession,
+		Session:  aws.String(session.CognitoSession),
 		UserCode: aws.String(task.Code),
 		//FriendlyDeviceName: aws.String("MyDevice"), // Optional device name
 	}
@@ -371,10 +386,10 @@ func processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoftwareTokenTask
 	handleChallenge(finalResult.ChallengeName, finalResult.ChallengeParameters, task.Task, *finalResult.Session)
 }
 
-func verifyMFACode(session LoginSession, task mfaVerifyTask, step NextStep) {
+func verifyMFACode(session *LoginSession, task mfaVerifyTask, step NextStep) {
 	challengeResp := &cognitoidentityprovider.RespondToAuthChallengeInput{
 		ClientId: aws.String(cognitoClientID),
-		Session:  &session.cognitoSession,
+		Session:  aws.String(session.CognitoSession),
 		ChallengeResponses: map[string]string{
 			"USERNAME": task.User,
 		},
@@ -438,25 +453,23 @@ func processMFAVerifyTask(task mfaVerifyTask) {
 		return
 	}
 
-	var session LoginSession
-	if s, ok := getTaskSession(task.Task); !ok {
+	session := getLoginSession(task.Task)
+	if session == nil {
 		return
-	} else {
-		session = s
 	}
 
-	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User), zap.String("nextStep", string(session.nextStep)))
+	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User), zap.String("nextStep", string(session.NextStep)))
 
-	switch session.nextStep {
+	switch session.NextStep {
 	case NextStepMFASoftwareTokenVerify:
 		fallthrough
 	case NextStepMFAEMailVerify:
 		fallthrough
 	case NextStepMFASMSVerify:
-		verifyMFACode(session, task, session.nextStep)
+		verifyMFACode(session, task, session.NextStep)
 	}
 	task.ResultChan <- TaskResult{
-		Err: NewNextStepError([]NextStep{NextStepMFASoftwareTokenVerify, NextStepMFAEMailVerify, NextStepMFASMSVerify}, session.nextStep),
+		Err: NewNextStepError([]NextStep{NextStepMFASoftwareTokenVerify, NextStepMFAEMailVerify, NextStepMFASMSVerify}, session.NextStep),
 	}
 }
 
@@ -539,17 +552,15 @@ func processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUpdateRequestTa
 
 	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
-	var session LoginSession
-	if s, ok := getTaskSession(task.Task); !ok || !checkNextStep(task.Task, s, NextStepNewPassword) {
+	session := getLoginSession(task.Task)
+	if session == nil || !checkNextStep(task.Task, session, NextStepNewPassword) {
 		return
-	} else {
-		session = s
 	}
 
 	input := &cognitoidentityprovider.RespondToAuthChallengeInput{
 		ChallengeName: cognitoTypes.ChallengeNameTypeNewPasswordRequired,
 		ClientId:      aws.String(cognitoClientID),
-		Session:       aws.String(session.cognitoSession),
+		Session:       aws.String(session.CognitoSession),
 		ChallengeResponses: map[string]string{
 			"USERNAME":     task.User,
 			"NEW_PASSWORD": task.Password,
@@ -621,7 +632,7 @@ func processLogOutTask(task logOutTask) {
 			input.ClientSecret = aws.String(cognitoClientSecret)
 		}
 
-		_, err := cognitoClient.RevokeToken(task.Context, input)
+		_, err := cognitoClient.RevokeToken(context.Background(), input)
 
 		if err != nil {
 			requestLogger.Warn("failed to revoke token", zap.Error(err))
@@ -790,7 +801,13 @@ func updateSoftwareToken(task updateMFATask) {
 		return
 	}
 
-	createLoginSession(task.SessionKey, "", NextStepMFASoftwareTokenSetupVerify, time.Now().Add(loginSessionValidFor), nil)
+	if err := sessionStorage.CreateLoginSession(task.Context, task.SessionKey, "", NextStepMFASoftwareTokenSetupVerify, time.Now().Add(loginSessionValidFor), nil); err != nil {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewInternalError("failed to create login session", err),
+		}
+		return
+	}
+
 	task.ResultChan <- TaskResult{
 		NextStep:   NextStepMFASoftwareTokenSetupVerify,
 		SessionKey: task.SessionKey,
@@ -861,14 +878,12 @@ func processVerifyUpdateMFATask(task verifyMFAUpdateTask) {
 
 	requestLogger.Log(processingLogLevel, "processing")
 
-	var session LoginSession
-	if s, ok := getTaskSession(task.Task); !ok {
+	session := getLoginSession(task.Task)
+	if session == nil {
 		return
-	} else {
-		session = s
 	}
 
-	switch session.nextStep {
+	switch session.NextStep {
 	case NextStepMFASoftwareTokenSetupVerify:
 		verifyMFASetupSoftwareToken(task)
 	default:
@@ -893,11 +908,9 @@ func processSelectMFATask(task selectMFATask) {
 
 	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("mfaType", string(task.MFAType)))
 
-	var session LoginSession
-	if s, ok := getTaskSession(task.Task); !ok || !checkNextStep(task.Task, s, NextStepMFASelect) {
+	session := getLoginSession(task.Task)
+	if session == nil || !checkNextStep(task.Task, session, NextStepMFASelect) {
 		return
-	} else {
-		session = s
 	}
 
 	t, ok := reverseMFAMapping[task.MFAType]
@@ -911,7 +924,7 @@ func processSelectMFATask(task selectMFATask) {
 	input := &cognitoidentityprovider.RespondToAuthChallengeInput{
 		ChallengeName: cognitoTypes.ChallengeNameTypeSelectMfaType,
 		ClientId:      aws.String(cognitoClientID),
-		Session:       aws.String(session.cognitoSession),
+		Session:       aws.String(session.CognitoSession),
 		ChallengeResponses: map[string]string{
 			"ANSWER":   t,
 			"USERNAME": task.User,
@@ -970,11 +983,9 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 	defer func() {
 		time.Sleep(100 * time.Millisecond) //always sleep a bit
 
-		users, err := findUsersByEmail(task.Context, task.Email)
+		users, err := findUsersByEmail(context.Background(), task.Email)
 		if err != nil {
-			task.ResultChan <- TaskResult{
-				Err: err,
-			}
+			requestLogger.Error("unable to retrieve user", zap.Error(err))
 			return
 		}
 
@@ -988,7 +999,10 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 
 			resetSettings := passwordreset.GetSettings()
 
-			createResetPasswordSession(token, *user.Username, task.Email, time.Now().Add(resetSettings.ValidFor))
+			if err := sessionStorage.CreateResetPasswordSession(context.Background(), token, *user.Username, task.Email, time.Now().Add(resetSettings.ValidFor)); err != nil {
+				requestLogger.Error("failed to create password reset session", zap.Error(err))
+				return
+			}
 
 			resetLink := fmt.Sprintf("%s/v1/password/reset?token=%s", config.GetURLBase(), token)
 
@@ -1002,9 +1016,7 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 
 			templateJSON, err := json.Marshal(templateData)
 			if err != nil {
-				task.ResultChan <- TaskResult{
-					Err: loginTypes.NewInternalError(err.Error(), err),
-				}
+				requestLogger.Error("failed to marshal template data", zap.Error(err))
 				return
 			}
 
@@ -1017,11 +1029,9 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 				TemplateData: aws.String(string(templateJSON)),
 			}
 
-			result, err := sesClient.SendTemplatedEmail(task.Context, input)
+			result, err := sesClient.SendTemplatedEmail(context.Background(), input)
 			if err != nil {
-				task.ResultChan <- TaskResult{
-					Err: loginTypes.NewInternalError(err.Error(), err),
-				}
+				requestLogger.Error("failed to send an email", zap.Error(err))
 				return
 			}
 
@@ -1041,23 +1051,35 @@ func processResetPasswordTask(task resetPasswordTask) {
 
 	requestLogger.Log(processingLogLevel, "processing")
 
-	session, ok := getResetPasswordSession(task.Token)
-	if !ok || session.used {
+	session, err := sessionStorage.GetResetPasswordSession(task.Context, task.Token)
+	if err != nil {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewInternalError("failed to retrieve password reset session", err),
+		}
+		return
+	}
+	if session == nil {
 		task.ResultChan <- TaskResult{
 			Err: &loginTypes.ResetPasswordSessionExpiredOrDoesNotExistError,
 		}
 		return
 	}
 
-	session.used = true
+	err = sessionStorage.DropResetPasswordSession(task.Context, task.Token)
+	if err != nil {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewInternalError("failed to drop password reset session", err),
+		}
+		return
+	}
 
 	input := &cognitoidentityprovider.ForgotPasswordInput{
 		ClientId: aws.String(cognitoClientID),
-		Username: aws.String(session.user),
+		Username: aws.String(session.User),
 	}
 
 	if cognitoClientSecret != "" {
-		input.SecretHash = aws.String(computeSecretHash(cognitoClientSecret, session.user, cognitoClientID))
+		input.SecretHash = aws.String(computeSecretHash(cognitoClientSecret, session.User, cognitoClientID))
 	}
 
 	result, err := cognitoClient.ForgotPassword(task.Context, input)
@@ -1070,7 +1092,7 @@ func processResetPasswordTask(task resetPasswordTask) {
 	}
 
 	requestLogger.Info("user password has been reset",
-		zap.String("user", session.user),
+		zap.String("user", session.User),
 		zap.String("deliveryMethod", string(result.CodeDeliveryDetails.DeliveryMedium)),
 		zap.String("destination", *result.CodeDeliveryDetails.Destination),
 	)
@@ -1078,7 +1100,7 @@ func processResetPasswordTask(task resetPasswordTask) {
 	resetSettings := passwordreset.GetSettings()
 
 	task.ResultChan <- TaskResult{
-		Payload: fmt.Sprintf(resetSettings.RedirectURL, session.user),
+		Payload: fmt.Sprintf(resetSettings.RedirectURL, session.User),
 	}
 }
 
