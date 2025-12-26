@@ -161,7 +161,7 @@ func NewLocalSessionStore() *LocalSessionStore {
 
 func (l *LocalSessionStore) GetLoginSession(_ context.Context, loginSession string) (*LoginSession, error) {
 	r, ok := l.activeLoginSessions.Load(loginSession)
-	if ok && r != nil && r.(LoginSession).Created.Before(time.Now()) {
+	if ok && r != nil && r.(*LoginSession).Created.Before(time.Now()) {
 		return r.(*LoginSession), nil
 	}
 	return nil, nil
