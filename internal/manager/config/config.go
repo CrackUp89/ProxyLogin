@@ -17,7 +17,7 @@ func LoadConfig() {
 		if port != "" {
 			port = ":" + port
 		}
-		urlBase = "http://" + host + port
+		urlBase = "http://" + host + port + "/v1"
 	}
 }
 

@@ -1004,7 +1004,7 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 				return
 			}
 
-			resetLink := fmt.Sprintf("%s/v1/password/reset?token=%s", config.GetURLBase(), token)
+			resetLink := fmt.Sprintf("%s/password/reset?token=%s", config.GetURLBase(), token)
 
 			templateData := map[string]interface{}{
 				"username":      *user.Username,
