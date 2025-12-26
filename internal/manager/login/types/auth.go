@@ -146,3 +146,19 @@ func (i invalidNewPasswordError) Code() int {
 }
 
 var InvalidNewPasswordError = invalidNewPasswordError{}
+
+type invalidVerificationCodeError struct{}
+
+func (i invalidVerificationCodeError) Error() string {
+	return "invalid verification code"
+}
+
+func (i invalidVerificationCodeError) PrivateError() string {
+	return "invalid verification code"
+}
+
+func (i invalidVerificationCodeError) Code() int {
+	return 1005
+}
+
+var InvalidVerificationCodeError = invalidVerificationCodeError{}

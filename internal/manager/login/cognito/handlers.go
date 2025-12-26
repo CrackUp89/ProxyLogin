@@ -66,7 +66,10 @@ func processError(w http.ResponseWriter, err types.GenericError, ctx context.Con
 		requestLogger := getRequestLogger(ctx)
 
 		var authError *types.GenericAuthenticationError
-		if errors.As(err, &authError) || errors.Is(err, types.InvalidUserOrPasswordError) || errors.Is(err, types.InvalidMFACodeError) {
+		if errors.As(err, &authError) ||
+			errors.Is(err, types.InvalidUserOrPasswordError) ||
+			errors.Is(err, types.InvalidMFACodeError) ||
+			errors.Is(err, types.InvalidVerificationCodeError) {
 			requestLogger.Warn("authentication error", zap.Error(err), zap.String("privateError", err.PrivateError()))
 			logTransportError(httpTools.WriteUnauthorized(w, err), ctx)
 			return false

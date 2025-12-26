@@ -35,7 +35,7 @@ func LoadConfig() {
 	}
 
 	defer logger.Sync()
-	logger = logger.WithOptions(opts...)
+	logger = logger.WithOptions(opts...).With(zap.String("instanceId", "instance.id"))
 }
 
 func GetRootLogger() *zap.Logger {

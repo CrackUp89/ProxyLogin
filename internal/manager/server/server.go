@@ -31,6 +31,8 @@ func getLogger() *zap.Logger {
 }
 
 func init() {
+	viper.SetDefault("instance.id", "proxylogin")
+
 	viper.SetDefault("http.address", "")
 	viper.SetDefault("http.port", "http")
 	viper.SetDefault("http.cors.enabled", false)

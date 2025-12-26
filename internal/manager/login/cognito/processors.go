@@ -1127,6 +1127,14 @@ func processFinalizePasswordResetTask(task finalizePasswordResetTask) {
 	_, err := cognitoClient.ConfirmForgotPassword(task.Context, input)
 
 	if err != nil {
+		var cme *cognitoTypes.CodeMismatchException
+		if errors.As(err, &cme) {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.InvalidVerificationCodeError,
+			}
+			return
+		}
+
 		task.ResultChan <- TaskResult{
 			Err: loginTypes.NewInternalError(err.Error(), err),
 		}
