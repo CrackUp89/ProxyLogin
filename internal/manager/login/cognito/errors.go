@@ -2,6 +2,7 @@ package cognito
 
 import (
 	"fmt"
+	"proxylogin/internal/manager/login/types"
 	"proxylogin/internal/manager/tools"
 )
 
@@ -22,6 +23,10 @@ func (e NextStepError) PrivateError() string {
 	return fmt.Sprintf("unexpected next step: %s; expected: %s", e.Received, tools.JoinStringable(e.Expected, ", "))
 }
 
+func (e NextStepError) Type() types.ErrorType {
+	return types.BadDataErrorType
+}
+
 func NewNextStepError(expected []NextStep, received NextStep) *NextStepError {
 	return &NextStepError{expected, received}
 }
@@ -40,6 +45,10 @@ func (e noChallengeOrAuthenticationResultError) PrivateError() string {
 	return "received no challenge requested or authentication result"
 }
 
+func (e noChallengeOrAuthenticationResultError) Type() types.ErrorType {
+	return types.InternalErrorType
+}
+
 var NoChallengeOrAuthenticationResultError = noChallengeOrAuthenticationResultError{}
 
 type inconclusiveResponseError struct{}
@@ -54,6 +63,10 @@ func (e inconclusiveResponseError) Error() string {
 
 func (e inconclusiveResponseError) PrivateError() string {
 	return "received no error or conclusive result"
+}
+
+func (e inconclusiveResponseError) Type() types.ErrorType {
+	return types.InternalErrorType
 }
 
 var InconclusiveResponseError = inconclusiveResponseError{}

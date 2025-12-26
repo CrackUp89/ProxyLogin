@@ -20,6 +20,10 @@ func (t TooManyTasks) Code() int {
 	return 9000
 }
 
+func (t TooManyTasks) Type() ErrorType {
+	return OverloadErrorType
+}
+
 func NewTooManyTasks(taskName string) TooManyTasks {
 	return TooManyTasks{taskName: taskName}
 }

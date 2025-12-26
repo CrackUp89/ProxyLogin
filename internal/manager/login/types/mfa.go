@@ -22,6 +22,10 @@ func (e invalidMFASoftwareTokenError) Error() string {
 	return "invalid MFA code"
 }
 
+func (e invalidMFASoftwareTokenError) Type() ErrorType {
+	return AuthErrorType
+}
+
 var InvalidMFACodeError = invalidMFASoftwareTokenError{}
 
 type MFAStatus struct {

@@ -6,10 +6,20 @@ type TokenSet struct {
 	RefreshToken string `json:"refresh_token,omitempty"`
 }
 
+type ErrorType string
+
+const (
+	AuthErrorType     ErrorType = "auth"
+	BadDataErrorType  ErrorType = "bad_data"
+	InternalErrorType ErrorType = "internal"
+	OverloadErrorType ErrorType = "overload"
+)
+
 type GenericError interface {
 	Error() string
 	PrivateError() string
 	Code() int
+	Type() ErrorType
 }
 
 type InternalError struct {
@@ -27,6 +37,10 @@ func (e *InternalError) Error() string {
 
 func (e *InternalError) PrivateError() string {
 	return e.privateMessage
+}
+
+func (e *InternalError) Type() ErrorType {
+	return InternalErrorType
 }
 
 func NewInternalError(privateMessage string, originalError error) *InternalError {
@@ -55,6 +69,10 @@ func (e *GenericAuthenticationError) PrivateError() string {
 	return e.privateMessage
 }
 
+func (e *GenericAuthenticationError) Type() ErrorType {
+	return AuthErrorType
+}
+
 func NewGenericAuthenticationError(privateMessage string, publicMessage string, originalError error) *GenericAuthenticationError {
 	return &GenericAuthenticationError{privateMessage, publicMessage, originalError}
 }
@@ -77,6 +95,10 @@ func (e *BadRequestError) PrivateError() string {
 	return e.privateMessage
 }
 
+func (e *BadRequestError) Type() ErrorType {
+	return BadDataErrorType
+}
+
 func NewBadRequestError(privateMessage string, publicMessage string, originalError error) *BadRequestError {
 	return &BadRequestError{privateMessage, publicMessage, originalError}
 }
@@ -93,6 +115,10 @@ func (s *LoginSessionExpiredOrDoesNotExistError) PrivateError() string {
 
 func (s *LoginSessionExpiredOrDoesNotExistError) Code() int {
 	return 1001
+}
+
+func (s *LoginSessionExpiredOrDoesNotExistError) Type() ErrorType {
+	return BadDataErrorType
 }
 
 func NewLoginSessionExpiredOrDoesNotExistError() *LoginSessionExpiredOrDoesNotExistError {
@@ -113,6 +139,10 @@ func (i invalidUserOrPasswordError) Code() int {
 	return 1002
 }
 
+func (i invalidUserOrPasswordError) Type() ErrorType {
+	return AuthErrorType
+}
+
 var InvalidUserOrPasswordError = invalidUserOrPasswordError{}
 
 type passwordHistoryError struct{}
@@ -127,6 +157,10 @@ func (i passwordHistoryError) PrivateError() string {
 
 func (i passwordHistoryError) Code() int {
 	return 1003
+}
+
+func (i passwordHistoryError) Type() ErrorType {
+	return BadDataErrorType
 }
 
 var PasswordHistoryError = passwordHistoryError{}
@@ -145,6 +179,10 @@ func (i invalidNewPasswordError) Code() int {
 	return 1004
 }
 
+func (i invalidNewPasswordError) Type() ErrorType {
+	return BadDataErrorType
+}
+
 var InvalidNewPasswordError = invalidNewPasswordError{}
 
 type invalidVerificationCodeError struct{}
@@ -159,6 +197,10 @@ func (i invalidVerificationCodeError) PrivateError() string {
 
 func (i invalidVerificationCodeError) Code() int {
 	return 1005
+}
+
+func (i invalidVerificationCodeError) Type() ErrorType {
+	return AuthErrorType
 }
 
 var InvalidVerificationCodeError = invalidVerificationCodeError{}

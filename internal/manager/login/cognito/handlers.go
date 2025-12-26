@@ -2,7 +2,6 @@ package cognito
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"proxylogin/internal/manager/login/types"
 	"proxylogin/internal/manager/tools"
@@ -65,41 +64,27 @@ func processError(w http.ResponseWriter, err types.GenericError, ctx context.Con
 	if err != nil {
 		requestLogger := getRequestLogger(ctx)
 
-		var authError *types.GenericAuthenticationError
-		if errors.As(err, &authError) ||
-			errors.Is(err, types.InvalidUserOrPasswordError) ||
-			errors.Is(err, types.InvalidMFACodeError) ||
-			errors.Is(err, types.InvalidVerificationCodeError) {
+		switch err.Type() {
+		case types.AuthErrorType:
 			requestLogger.Warn("authentication error", zap.Error(err), zap.String("privateError", err.PrivateError()))
 			logTransportError(httpTools.WriteUnauthorized(w, err), ctx)
-			return false
-		}
-
-		var internalError *types.InternalError
-		if errors.As(err, &internalError) || errors.Is(err, NoChallengeOrAuthenticationResultError) || errors.Is(err, InconclusiveResponseError) {
+			break
+		case types.BadDataErrorType:
+			requestLogger.Warn("bad request", zap.Error(err), zap.String("privateError", err.PrivateError()))
+			logTransportError(httpTools.WriteBadRequest(w, err), ctx)
+			break
+		case types.OverloadErrorType:
+			requestLogger.Error("overloaded", zap.Error(err), zap.String("privateError", err.PrivateError()))
+			logTransportError(httpTools.WriteTooManyRequests(w), ctx)
+			break
+		case types.InternalErrorType:
+			handlersLogger.Error("unknown error type", zap.Error(err), zap.String("type", string(err.Type())))
+			fallthrough
+		default:
 			requestLogger.Error("internal error", zap.Error(err), zap.String("privateError", err.PrivateError()))
 			logTransportError(httpTools.WriteInternalServiceError(w, err), ctx)
-			return false
+			break
 		}
-
-		var badRequestError *types.BadRequestError
-		var nextStepError *NextStepError
-		if errors.As(err, &badRequestError) || errors.As(err, &nextStepError) {
-			requestLogger.Warn("bad request", zap.Error(err), zap.String("privateError", err.PrivateError()))
-			logTransportError(httpTools.WriteInternalServiceError(w, err), ctx)
-			return false
-		}
-
-		var tooManyTasks *types.TooManyTasks
-		if errors.As(err, &tooManyTasks) {
-			requestLogger.Error("too many tasks", zap.Error(err), zap.String("privateError", err.PrivateError()))
-			logTransportError(httpTools.WriteTooManyRequests(w), ctx)
-			return false
-		}
-
-		requestLogger.Warn("unknown error", zap.Error(err), zap.String("privateError", err.PrivateError()))
-		logTransportError(httpTools.WriteInternalServiceError(w, err), ctx)
-		return false
 	}
 
 	return true
