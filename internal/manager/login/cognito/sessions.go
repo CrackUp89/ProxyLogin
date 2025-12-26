@@ -85,7 +85,7 @@ func startLocalStorageCleanupRoutine() func() {
 		for {
 			select {
 			case <-cleanup.C:
-				cleanupExpiredSessions[LoginSession](sessionStorage.(*LocalSessionStore).activeLoginSessions)
+				cleanupExpiredSessions[*LoginSession](sessionStorage.(*LocalSessionStore).activeLoginSessions)
 				cleanupExpiredSessions[*InitiateResetPasswordSession](sessionStorage.(*LocalSessionStore).activeInitiateResetPasswordSessions)
 			case <-stop:
 				getSessionsLogger().Info("Session cleanup routine stopped")

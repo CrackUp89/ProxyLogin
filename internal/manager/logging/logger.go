@@ -7,6 +7,11 @@ import (
 
 var logger *zap.Logger
 
+func init() {
+	viper.SetDefault("logging.dev", false)
+	viper.SetDefault("logging.verbose", false)
+}
+
 func LoadConfig() {
 	devMode := viper.GetBool("logging.dev")
 	var err error
@@ -21,11 +26,19 @@ func LoadConfig() {
 		panic(err)
 	}
 
+	opts := []zap.Option{
+		zap.AddStacktrace(zap.ErrorLevel),
+	}
+
+	if viper.GetBool("logging.verbose") {
+		opts = append(opts, zap.IncreaseLevel(zap.DebugLevel))
+	}
+
 	defer logger.Sync()
-	logger = logger.WithOptions(zap.AddStacktrace(zap.ErrorLevel))
+	logger = logger.WithOptions(opts...)
 }
 
-func GetLogger() *zap.Logger {
+func GetRootLogger() *zap.Logger {
 	return logger
 }
 
