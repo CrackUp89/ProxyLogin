@@ -50,7 +50,7 @@ func startWorker() chan bool {
 			case t := <-getMFAStatusTasks:
 				processGetMFAStatusTask(t)
 				break
-			case t := <-updateMFATasks:
+			case t := <-updateMFASoftwareTokenTasks:
 				processUpdateMFATask(t)
 				break
 			case t := <-verifyMFAUpdateTasks:

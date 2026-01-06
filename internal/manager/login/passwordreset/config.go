@@ -7,13 +7,14 @@ import (
 )
 
 type Settings struct {
-	Enabled      bool
-	Company      string
-	Year         int
-	Sender       string
-	TemplateName string
-	ValidFor     time.Duration
-	RedirectURL  string
+	Enabled          bool
+	Company          string
+	Year             int
+	Sender           string
+	TemplateName     string
+	ValidFor         time.Duration
+	RedirectURL      string
+	ErrorRedirectURL string
 }
 
 var settings Settings
@@ -31,13 +32,14 @@ func init() {
 
 func LoadConfig() {
 	settings = Settings{
-		Enabled:      viper.GetBool("password.reset.enabled"),
-		Company:      viper.GetString("password.reset.company"),
-		Year:         viper.GetInt("password.reset.year"),
-		Sender:       viper.GetString("password.reset.sender"),
-		TemplateName: viper.GetString("password.reset.templateName"),
-		ValidFor:     time.Duration(viper.GetInt("password.reset.tokenValidFor")) * time.Minute,
-		RedirectURL:  viper.GetString("password.reset.redirectURL"),
+		Enabled:          viper.GetBool("password.reset.enabled"),
+		Company:          viper.GetString("password.reset.company"),
+		Year:             viper.GetInt("password.reset.year"),
+		Sender:           viper.GetString("password.reset.sender"),
+		TemplateName:     viper.GetString("password.reset.templateName"),
+		ValidFor:         time.Duration(viper.GetInt("password.reset.tokenValidFor")) * time.Minute,
+		RedirectURL:      viper.GetString("password.reset.redirectURL"),
+		ErrorRedirectURL: viper.GetString("password.reset.errorRedirectURL"),
 	}
 }
 

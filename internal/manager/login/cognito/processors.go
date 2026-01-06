@@ -769,26 +769,7 @@ func processGetMFAStatusTask(task getMFAStatusTask) {
 	}
 }
 
-func updateSoftwareToken(task updateMFATask) {
-	//softwareTokenSettings := &cognitoTypes.SoftwareTokenMfaSettingsType{
-	//	Enabled:      false,
-	//	PreferredMfa: false,
-	//}
-
-	//input := &cognitoidentityprovider.SetUserMFAPreferenceInput{
-	//	AccessToken:              aws.String(task.AccessToken),
-	//	SoftwareTokenMfaSettings: softwareTokenSettings,
-	//}
-	//
-	//_, err := cognitoClient.SetUserMFAPreference(task.Context, input)
-	//
-	//if err != nil {
-	//	task.ResultChan <- TaskResult{
-	//		Err: loginTypes.NewInternalError(err.Error(), "Internal error", err),
-	//	}
-	//	return
-	//}
-
+func updateSoftwareToken(task updateMFASoftwareTokenTask) {
 	associateInput := &cognitoidentityprovider.AssociateSoftwareTokenInput{
 		AccessToken: aws.String(task.AccessToken),
 	}
@@ -801,7 +782,7 @@ func updateSoftwareToken(task updateMFATask) {
 		return
 	}
 
-	if err := sessionStorage.CreateLoginSession(task.Context, task.SessionKey, "", NextStepMFASoftwareTokenSetupVerify, time.Now().Add(loginSessionValidFor), nil); err != nil {
+	if err = sessionStorage.CreateLoginSession(task.Context, task.SessionKey, "", NextStepMFASoftwareTokenSetupVerify, time.Now().Add(loginSessionValidFor), nil); err != nil {
 		task.ResultChan <- TaskResult{
 			Err: loginTypes.NewInternalError("failed to create login session", err),
 		}
@@ -815,7 +796,7 @@ func updateSoftwareToken(task updateMFATask) {
 	}
 }
 
-func processUpdateMFATask(task updateMFATask) {
+func processUpdateMFATask(task updateMFASoftwareTokenTask) {
 	if !checkTaskContext(task.Task) {
 		return
 	}
@@ -864,6 +845,28 @@ func verifyMFASetupSoftwareToken(task verifyMFAUpdateTask) {
 			Err: InconclusiveResponseError,
 		}
 		return
+	}
+
+	if poolDescription.MfaConfiguration == cognitoTypes.UserPoolMfaTypeOptional {
+
+		softwareTokenSettings := &cognitoTypes.SoftwareTokenMfaSettingsType{
+			Enabled:      true,
+			PreferredMfa: false,
+		}
+
+		mfaPreferenceInput := &cognitoidentityprovider.SetUserMFAPreferenceInput{
+			AccessToken:              aws.String(task.AccessToken),
+			SoftwareTokenMfaSettings: softwareTokenSettings,
+		}
+
+		_, err = cognitoClient.SetUserMFAPreference(task.Context, mfaPreferenceInput)
+
+		if err != nil {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.NewInternalError("failed to enable software token MFA", err),
+			}
+			return
+		}
 	}
 
 	task.ResultChan <- TaskResult{}
@@ -1042,6 +1045,16 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 	task.ResultChan <- TaskResult{}
 }
 
+func redirectToPasswordErrorPageIfConfigured(task Task, errorRedirectURL string) bool {
+	if errorRedirectURL != "" {
+		task.ResultChan <- TaskResult{
+			Payload: errorRedirectURL,
+		}
+		return true
+	}
+	return false
+}
+
 func processResetPasswordTask(task resetPasswordTask) {
 	if !checkTaskContext(task.Task) {
 		return
@@ -1051,24 +1064,32 @@ func processResetPasswordTask(task resetPasswordTask) {
 
 	requestLogger.Log(processingLogLevel, "processing")
 
+	resetSettings := passwordreset.GetSettings()
+
 	session, err := sessionStorage.GetResetPasswordSession(task.Context, task.Token)
 	if err != nil {
-		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewInternalError("failed to retrieve password reset session", err),
+		if !redirectToPasswordErrorPageIfConfigured(task.Task, resetSettings.ErrorRedirectURL) {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.NewInternalError("failed to retrieve password reset session", err),
+			}
 		}
 		return
 	}
 	if session == nil {
-		task.ResultChan <- TaskResult{
-			Err: &loginTypes.ResetPasswordSessionExpiredOrDoesNotExistError,
+		if !redirectToPasswordErrorPageIfConfigured(task.Task, resetSettings.ErrorRedirectURL) {
+			task.ResultChan <- TaskResult{
+				Err: &loginTypes.ResetPasswordSessionExpiredOrDoesNotExistError,
+			}
 		}
 		return
 	}
 
 	err = sessionStorage.DropResetPasswordSession(task.Context, task.Token)
 	if err != nil {
-		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewInternalError("failed to drop password reset session", err),
+		if !redirectToPasswordErrorPageIfConfigured(task.Task, resetSettings.ErrorRedirectURL) {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.NewInternalError("failed to drop password reset session", err),
+			}
 		}
 		return
 	}
@@ -1085,8 +1106,10 @@ func processResetPasswordTask(task resetPasswordTask) {
 	result, err := cognitoClient.ForgotPassword(task.Context, input)
 
 	if err != nil {
-		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewInternalError(err.Error(), err),
+		if !redirectToPasswordErrorPageIfConfigured(task.Task, resetSettings.ErrorRedirectURL) {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.NewInternalError(err.Error(), err),
+			}
 		}
 		return
 	}
@@ -1096,8 +1119,6 @@ func processResetPasswordTask(task resetPasswordTask) {
 		zap.String("deliveryMethod", string(result.CodeDeliveryDetails.DeliveryMedium)),
 		zap.String("destination", *result.CodeDeliveryDetails.Destination),
 	)
-
-	resetSettings := passwordreset.GetSettings()
 
 	task.ResultChan <- TaskResult{
 		Payload: fmt.Sprintf(resetSettings.RedirectURL, session.User),

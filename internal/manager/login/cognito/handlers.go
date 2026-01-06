@@ -3,6 +3,7 @@ package cognito
 import (
 	"context"
 	"net/http"
+	"proxylogin/internal/manager/login/passwordreset"
 	"proxylogin/internal/manager/login/types"
 	"proxylogin/internal/manager/tools"
 	httpTools "proxylogin/internal/manager/tools/http"
@@ -78,13 +79,15 @@ func processError(w http.ResponseWriter, err types.GenericError, ctx context.Con
 			logTransportError(httpTools.WriteTooManyRequests(w), ctx)
 			break
 		case types.InternalErrorType:
-			handlersLogger.Error("unknown error type", zap.Error(err), zap.String("type", string(err.Type())))
-			fallthrough
-		default:
 			requestLogger.Error("internal error", zap.Error(err), zap.String("privateError", err.PrivateError()))
 			logTransportError(httpTools.WriteInternalServiceError(w, err), ctx)
 			break
+		default:
+			handlersLogger.Error("unknown error type", zap.Error(err), zap.String("type", string(err.Type())), zap.String("privateError", err.PrivateError()))
+			logTransportError(httpTools.WriteInternalServiceError(w, err), ctx)
+			break
 		}
+		return false
 	}
 
 	return true
@@ -414,7 +417,7 @@ func createUpdateMFA() http.Handler {
 			if !ok {
 				return
 			}
-			trc, err := AddUpdateMFATask(r.Context(), newSessionKey(), value.AccessToken, value.MFAType)
+			trc, err := AddUpdateMFASoftwareTokenTask(r.Context(), newSessionKey(), value.AccessToken, value.MFAType)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -589,11 +592,15 @@ func AddRoutes(mux *http.ServeMux) *http.ServeMux {
 	mux.Handle("POST /v1/refresh", withDefaultMiddleware(createRefreshToken()))
 	mux.Handle("POST /v1/logout", withDefaultMiddleware(createLogOut()))
 	mux.Handle("POST /v1/password/update", withDefaultMiddleware(createUpdatePasswordRequest()))
-	mux.Handle("GET /v1/password/reset", withDefaultMiddleware(createResetPasswordRequest()))
-	mux.Handle("POST /v1/password/reset/request", withDefaultMiddleware(createInitiatePasswordResetRequest()))
-	mux.Handle("POST /v1/password/reset/finalize", withDefaultMiddleware(createFinalizePasswordResetRequest()))
 	mux.Handle("POST /v1/mfa/status", withDefaultMiddleware(createGetMFAStatus()))
 	mux.Handle("POST /v1/mfa/update", withDefaultMiddleware(createUpdateMFA()))
 	mux.Handle("POST /v1/mfa/update/verify", withDefaultMiddleware(createVerifyUpdateMFA()))
+
+	if passwordreset.GetSettings().Enabled {
+		mux.Handle("GET /v1/password/reset", withDefaultMiddleware(createResetPasswordRequest()))
+		mux.Handle("POST /v1/password/reset/request", withDefaultMiddleware(createInitiatePasswordResetRequest()))
+		mux.Handle("POST /v1/password/reset/finalize", withDefaultMiddleware(createFinalizePasswordResetRequest()))
+	}
+
 	return mux
 }

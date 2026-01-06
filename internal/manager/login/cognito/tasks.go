@@ -186,20 +186,20 @@ func AddGetMFAStatusTask(ctx context.Context, accessToken string) (TaskResultCha
 	return resultChan, nil
 }
 
-type updateMFATask struct {
+type updateMFASoftwareTokenTask struct {
 	AccessToken string
 	MFAType     types.MFAType
 	Task
 }
 
-var updateMFATasks, updateMFATasksValidate = createTaskChan[updateMFATask]()
+var updateMFASoftwareTokenTasks, updateMFASoftwareTokenTasksValidate = createTaskChan[updateMFASoftwareTokenTask]()
 
-func AddUpdateMFATask(ctx context.Context, sessionKey string, accessToken string, mfaType types.MFAType) (TaskResultChan, types.GenericError) {
-	if err := updateMFATasksValidate(); err != nil {
+func AddUpdateMFASoftwareTokenTask(ctx context.Context, sessionKey string, accessToken string, mfaType types.MFAType) (TaskResultChan, types.GenericError) {
+	if err := updateMFASoftwareTokenTasksValidate(); err != nil {
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	updateMFATasks <- updateMFATask{accessToken, mfaType, Task{ctx, sessionKey, resultChan}}
+	updateMFASoftwareTokenTasks <- updateMFASoftwareTokenTask{accessToken, mfaType, Task{ctx, sessionKey, resultChan}}
 	return resultChan, nil
 }
 
