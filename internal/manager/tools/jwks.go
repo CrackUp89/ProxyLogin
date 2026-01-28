@@ -53,3 +53,13 @@ func (v *JWKSValidator) ValidateToken(tokenString string) (*jwt.Token, error) {
 
 	return token, nil
 }
+
+func (v *JWKSValidator) ParseToken(tokenString string) (*jwt.Token, error) {
+	token, err := jwt.Parse(tokenString, v.jwks.Keyfunc)
+
+	if err != nil {
+		return nil, fmt.Errorf("token parsing failed: %w", err)
+	}
+
+	return token, nil
+}

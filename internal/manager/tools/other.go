@@ -48,3 +48,17 @@ func JoinStringable[T Stringable](elems []T, sep string) string {
 	}
 	return b.String()
 }
+
+func AllInSlice[T any](elems []T, comparator func(T, T) bool) bool {
+	if len(elems) == 0 || len(elems) == 1 {
+		return true
+	}
+
+	for i := 0; i < len(elems)-1; i++ {
+		if !comparator(elems[i], elems[i+1]) {
+			return false
+		}
+	}
+
+	return true
+}

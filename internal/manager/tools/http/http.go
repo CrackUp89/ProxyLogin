@@ -205,3 +205,11 @@ func (rt *RequestTracker) GetActiveRequests() []RequestInfo {
 	})
 	return active
 }
+
+func ReadFirstNamedCookie(r *http.Request, name string) *http.Cookie {
+	cookies := r.CookiesNamed(name)
+	if len(cookies) == 0 {
+		return nil
+	}
+	return cookies[0]
+}

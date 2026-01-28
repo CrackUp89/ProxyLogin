@@ -12,13 +12,13 @@ type TaskResult struct {
 	Payload    interface{}
 	SessionKey string
 	Err        types.GenericError
+	Flags      TaskResultFlag
 }
 
 type TaskResultChan chan TaskResult
 
 type Task struct {
 	Context    context.Context
-	SessionKey string
 	ResultChan TaskResultChan
 }
 
@@ -34,25 +34,28 @@ func createTaskChan[T any]() (chan T, func() types.GenericError) {
 }
 
 type loginTask struct {
-	User     string
-	Password string
+	SessionKey   string
+	User         string
+	Password     string
+	RememberUser bool
 	Task
 }
 
 var loginTasks, loginTasksValidate = createTaskChan[loginTask]()
 
-func AddLoginTask(ctx context.Context, sessionKey string, user string, password string) (TaskResultChan, types.GenericError) {
+func AddLoginTask(ctx context.Context, sessionKey string, user string, password string, rememberUser bool) (TaskResultChan, types.GenericError) {
 	if err := loginTasksValidate(); err != nil {
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	loginTasks <- loginTask{user, password, Task{ctx, sessionKey, resultChan}}
+	loginTasks <- loginTask{sessionKey, user, password, rememberUser, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
 type mfaSetupTask struct {
-	User    string
-	MFAType types.MFAType
+	SessionKey string
+	User       string
+	MFAType    types.MFAType
 	Task
 }
 
@@ -63,13 +66,14 @@ func AddMFASetupTask(ctx context.Context, sessionKey string, user string, setupT
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	mfaSetupTasks <- mfaSetupTask{user, setupType, Task{ctx, sessionKey, resultChan}}
+	mfaSetupTasks <- mfaSetupTask{sessionKey, user, setupType, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
 type mfaSetupVerifySoftwareTokenTask struct {
-	User string
-	Code string
+	SessionKey string
+	User       string
+	Code       string
 	Task
 }
 
@@ -80,13 +84,14 @@ func AddMFASetupVerifySoftwareTokenTask(ctx context.Context, sessionKey string, 
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	mfaSetupSoftwareTokenVerifyTasks <- mfaSetupVerifySoftwareTokenTask{user, code, Task{ctx, sessionKey, resultChan}}
+	mfaSetupSoftwareTokenVerifyTasks <- mfaSetupVerifySoftwareTokenTask{sessionKey, user, code, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
 type mfaVerifyTask struct {
-	User string
-	Code string
+	SessionKey string
+	User       string
+	Code       string
 	Task
 }
 
@@ -97,7 +102,7 @@ func AddMFAVerifyTask(ctx context.Context, sessionKey string, user string, code 
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	mfaVerifyTasks <- mfaVerifyTask{user, code, Task{ctx, sessionKey, resultChan}}
+	mfaVerifyTasks <- mfaVerifyTask{sessionKey, user, code, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
@@ -109,12 +114,12 @@ type refreshTokenTask struct {
 
 var refreshTokenTasks, refreshTokenTasksValidate = createTaskChan[refreshTokenTask]()
 
-func AddRefreshTokenTask(ctx context.Context, sessionKey string, user string, refreshToken string) (TaskResultChan, types.GenericError) {
+func AddRefreshTokenTask(ctx context.Context, user string, refreshToken string) (TaskResultChan, types.GenericError) {
 	if err := refreshTokenTasksValidate(); err != nil {
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	refreshTokenTasks <- refreshTokenTask{user, refreshToken, Task{ctx, sessionKey, resultChan}}
+	refreshTokenTasks <- refreshTokenTask{user, refreshToken, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
@@ -125,16 +130,17 @@ type logOutTask struct {
 
 var logOutTasks, logOutTasksValidate = createTaskChan[logOutTask]()
 
-func AddLogOutTask(ctx context.Context, sessionKey string, refreshToken string) (TaskResultChan, types.GenericError) {
+func AddLogOutTask(ctx context.Context, refreshToken string) (TaskResultChan, types.GenericError) {
 	if err := logOutTasksValidate(); err != nil {
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	logOutTasks <- logOutTask{refreshToken, Task{ctx, sessionKey, resultChan}}
+	logOutTasks <- logOutTask{refreshToken, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
 type satisfyPasswordUpdateRequestTask struct {
+	SessionKey string
 	User       string
 	Password   string
 	Attributes map[string]string
@@ -148,12 +154,11 @@ func AddSatisfyPasswordUpdateRequestTask(ctx context.Context, sessionKey string,
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	satisfyPasswordUpdateRequestTasks <- satisfyPasswordUpdateRequestTask{user, password, attributes, Task{ctx, sessionKey, resultChan}}
+	satisfyPasswordUpdateRequestTasks <- satisfyPasswordUpdateRequestTask{sessionKey, user, password, attributes, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
 type updatePasswordTask struct {
-	AccessToken     string
 	CurrentPassword string
 	NewPassword     string
 	Task
@@ -161,62 +166,61 @@ type updatePasswordTask struct {
 
 var updatePasswordTasks, updatePasswordTasksValidate = createTaskChan[updatePasswordTask]()
 
-func AddUpdatePasswordTask(ctx context.Context, accessToken string, currentPassword string, newPassword string) (TaskResultChan, types.GenericError) {
+func AddUpdatePasswordTask(ctx context.Context, currentPassword string, newPassword string) (TaskResultChan, types.GenericError) {
 	if err := updatePasswordTasksValidate(); err != nil {
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	updatePasswordTasks <- updatePasswordTask{accessToken, currentPassword, newPassword, Task{ctx, "", resultChan}}
+	updatePasswordTasks <- updatePasswordTask{currentPassword, newPassword, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
 type getMFAStatusTask struct {
-	AccessToken string
 	Task
 }
 
 var getMFAStatusTasks, getMFAStatusTasksValidate = createTaskChan[getMFAStatusTask]()
 
-func AddGetMFAStatusTask(ctx context.Context, accessToken string) (TaskResultChan, types.GenericError) {
+func AddGetMFAStatusTask(ctx context.Context) (TaskResultChan, types.GenericError) {
 	if err := getMFAStatusTasksValidate(); err != nil {
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	getMFAStatusTasks <- getMFAStatusTask{accessToken, Task{ctx, "", resultChan}}
+	getMFAStatusTasks <- getMFAStatusTask{Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
 type updateMFASoftwareTokenTask struct {
-	AccessToken string
-	MFAType     types.MFAType
+	SessionKey string
+	MFAType    types.MFAType
 	Task
 }
 
 var updateMFASoftwareTokenTasks, updateMFASoftwareTokenTasksValidate = createTaskChan[updateMFASoftwareTokenTask]()
 
-func AddUpdateMFASoftwareTokenTask(ctx context.Context, sessionKey string, accessToken string, mfaType types.MFAType) (TaskResultChan, types.GenericError) {
+func AddUpdateMFASoftwareTokenTask(ctx context.Context, sessionKey string, mfaType types.MFAType) (TaskResultChan, types.GenericError) {
 	if err := updateMFASoftwareTokenTasksValidate(); err != nil {
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	updateMFASoftwareTokenTasks <- updateMFASoftwareTokenTask{accessToken, mfaType, Task{ctx, sessionKey, resultChan}}
+	updateMFASoftwareTokenTasks <- updateMFASoftwareTokenTask{sessionKey, mfaType, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
 type verifyMFAUpdateTask struct {
-	AccessToken string
-	Code        string
+	SessionKey string
+	Code       string
 	Task
 }
 
 var verifyMFAUpdateTasks, verifyMFAUpdateTasksValidate = createTaskChan[verifyMFAUpdateTask]()
 
-func AddVerifyMFAUpdateTask(ctx context.Context, sessionKey string, accessToken string, code string) (TaskResultChan, types.GenericError) {
+func AddVerifyMFAUpdateTask(ctx context.Context, sessionKey string, code string) (TaskResultChan, types.GenericError) {
 	if err := verifyMFAUpdateTasksValidate(); err != nil {
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	verifyMFAUpdateTasks <- verifyMFAUpdateTask{accessToken, code, Task{ctx, sessionKey, resultChan}}
+	verifyMFAUpdateTasks <- verifyMFAUpdateTask{sessionKey, code, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
@@ -234,7 +238,7 @@ func AddSelectMFATask(ctx context.Context, sessionKey string, user string, MFATy
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	selectMFATasks <- selectMFATask{sessionKey, user, MFAType, Task{ctx, sessionKey, resultChan}}
+	selectMFATasks <- selectMFATask{sessionKey, user, MFAType, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
@@ -250,7 +254,7 @@ func AddInitiatePasswordResetTask(ctx context.Context, email string) (TaskResult
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	initiatePasswordResetTasks <- initiatePasswordResetTask{email, Task{ctx, "", resultChan}}
+	initiatePasswordResetTasks <- initiatePasswordResetTask{email, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
@@ -266,7 +270,7 @@ func AddResetPasswordTask(ctx context.Context, token string) (TaskResultChan, ty
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	resetPasswordTasks <- resetPasswordTask{token, Task{ctx, "", resultChan}}
+	resetPasswordTasks <- resetPasswordTask{token, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 
@@ -284,6 +288,37 @@ func AddFinalizePasswordResetTask(ctx context.Context, user string, code string,
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	finalizePasswordResetTasks <- finalizePasswordResetTask{user, code, password, Task{ctx, "", resultChan}}
+	finalizePasswordResetTasks <- finalizePasswordResetTask{user, code, password, Task{ctx, resultChan}}
+	return resultChan, nil
+}
+
+type unmaskTokenTask struct {
+	Token string
+	Task
+}
+
+var unmaskTokenTasks, unmaskTokenTasksValidate = createTaskChan[unmaskTokenTask]()
+
+func AddUnmaskTokenTask(ctx context.Context, token string) (TaskResultChan, types.GenericError) {
+	if err := unmaskTokenTasksValidate(); err != nil {
+		return nil, err
+	}
+	resultChan := make(TaskResultChan)
+	unmaskTokenTasks <- unmaskTokenTask{token, Task{ctx, resultChan}}
+	return resultChan, nil
+}
+
+type getProfileTask struct {
+	Task
+}
+
+var getProfileTasks, getProfileTasksValidate = createTaskChan[getProfileTask]()
+
+func AddGetProfileTask(ctx context.Context) (TaskResultChan, types.GenericError) {
+	if err := getProfileTasksValidate(); err != nil {
+		return nil, err
+	}
+	resultChan := make(TaskResultChan)
+	getProfileTasks <- getProfileTask{Task{ctx, resultChan}}
 	return resultChan, nil
 }

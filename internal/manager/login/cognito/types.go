@@ -4,6 +4,34 @@ import (
 	"proxylogin/internal/manager/login/types"
 )
 
+type TaskResultFlag int
+
+const (
+	AuthInfoTaskResultFlag TaskResultFlag = 1 << iota
+	RememberTaskResultFlag
+	LogoutTaskResultFlag
+)
+
+func (f TaskResultFlag) Has(flag TaskResultFlag) bool {
+	return f&flag == flag
+}
+
+func (f TaskResultFlag) Add(flag TaskResultFlag) TaskResultFlag {
+	return f | flag
+}
+
+func (f TaskResultFlag) Remove(flag TaskResultFlag) TaskResultFlag {
+	return f &^ flag
+}
+
+type MasqueradedAuth struct {
+	Token string
+}
+
+type TokenAuth struct {
+	Token string
+}
+
 type RefreshMethod string
 
 var (
@@ -38,6 +66,7 @@ type NextStepResponse struct {
 type loginRequest struct {
 	User     string `json:"user"`
 	Password string `json:"password"`
+	Remember bool   `json:"remember"`
 }
 
 type WithValidation interface {
@@ -53,6 +82,19 @@ func (r loginRequest) Validate() types.ValidationIssues {
 		errs["password"] = "Password is required"
 	}
 	return errs
+}
+
+type loginResponseLoginType = string
+
+const (
+	TokenSetLoginResponseLoginType   loginResponseLoginType = "token_set"
+	CookiesLoginResponseLoginType    loginResponseLoginType = "cookies"
+	MasqueradeLoginResponseLoginType loginResponseLoginType = "masquerade"
+)
+
+type loginResponse struct {
+	LoginType loginResponseLoginType `json:"login_type"`
+	LoginData interface{}            `json:"login_data"`
 }
 
 type mfaSetupRequest struct {
@@ -165,16 +207,12 @@ func (r satisfyPasswordUpdateRequest) Validate() types.ValidationIssues {
 }
 
 type updatePasswordRequest struct {
-	AccessToken     string `json:"access_token"`
 	CurrentPassword string `json:"current_password"`
 	NewPassword     string `json:"new_password"`
 }
 
 func (r updatePasswordRequest) Validate() types.ValidationIssues {
 	errs := make(map[string]string)
-	if len(r.AccessToken) == 0 {
-		errs["access_token"] = "access token is required"
-	}
 	if len(r.CurrentPassword) == 0 {
 		errs["current_password"] = "current password is required"
 	}
@@ -184,28 +222,12 @@ func (r updatePasswordRequest) Validate() types.ValidationIssues {
 	return errs
 }
 
-type getMFAStatusRequest struct {
-	AccessToken string `json:"access_token"`
-}
-
-func (r getMFAStatusRequest) Validate() types.ValidationIssues {
-	errs := make(map[string]string)
-	if len(r.AccessToken) == 0 {
-		errs["access_token"] = "access token is required"
-	}
-	return errs
-}
-
 type updateMFARequest struct {
-	AccessToken string        `json:"access_token"`
-	MFAType     types.MFAType `json:"mfa_type"`
+	MFAType types.MFAType `json:"mfa_type"`
 }
 
 func (r updateMFARequest) Validate() types.ValidationIssues {
 	errs := make(map[string]string)
-	if len(r.AccessToken) == 0 {
-		errs["access_token"] = "access token is required"
-	}
 	if len(r.MFAType) == 0 {
 		errs["mfa_type"] = "mfa type is required"
 	}
@@ -213,16 +235,12 @@ func (r updateMFARequest) Validate() types.ValidationIssues {
 }
 
 type verifyMFAUpdateRequest struct {
-	Session     string `json:"session"`
-	AccessToken string `json:"access_token"`
-	Code        string `json:"code"`
+	Session string `json:"session"`
+	Code    string `json:"code"`
 }
 
 func (r verifyMFAUpdateRequest) Validate() types.ValidationIssues {
 	errs := make(map[string]string)
-	if len(r.AccessToken) == 0 {
-		errs["access_token"] = "access token is required"
-	}
 	if len(r.Session) == 0 {
 		errs["session"] = "Session is required"
 	}
@@ -290,6 +308,18 @@ func (r finalizePasswordResetRequest) Validate() types.ValidationIssues {
 	}
 	if len(r.Password) == 0 {
 		errs["password"] = "required"
+	}
+	return errs
+}
+
+type unmaskTokenRequest struct {
+	Token string `json:"token"`
+}
+
+func (r unmaskTokenRequest) Validate() types.ValidationIssues {
+	errs := make(map[string]string)
+	if len(r.Token) == 0 {
+		errs["token"] = "required"
 	}
 	return errs
 }

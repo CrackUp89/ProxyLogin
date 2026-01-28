@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"proxylogin/internal/manager/config"
+	"proxylogin/internal/manager/login/masquerade"
 	"proxylogin/internal/manager/login/passwordreset"
 	loginTypes "proxylogin/internal/manager/login/types"
 	"proxylogin/internal/manager/tools"
+	"proxylogin/internal/manager/tools/locking"
 	"strings"
 	"time"
 
@@ -46,18 +48,272 @@ func computeSecretHash(clientSecret, username, clientId string) string {
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
 }
 
-func authResultToTokenSet(authResult *cognitoTypes.AuthenticationResultType) loginTypes.TokenSet {
-	result := loginTypes.TokenSet{
+func resolveAuthTokenFromContext(ctx context.Context) (string, loginTypes.GenericError) {
+	auth := ctx.Value(AuthContextVarName)
+
+	if auth == nil {
+		return "", nil
+	}
+
+	if t, ok := auth.(TokenAuth); ok {
+		return t.Token, nil
+	}
+
+	if t, ok := auth.(MasqueradedAuth); ok {
+		requestLogger := getRequestLoggerFromContext(ctx)
+		token, err := unmaskToken(ctx, t.Token, requestLogger, true)
+		if err != nil {
+			return "", err
+		}
+		return token.AccessToken, nil
+	}
+
+	panic("unknown auth type")
+}
+
+func getMasqueradedTokenFromContext(ctx context.Context) string {
+	auth := ctx.Value(AuthContextVarName)
+
+	if auth == nil {
+		return ""
+	}
+
+	if t, ok := auth.(MasqueradedAuth); ok {
+		return t.Token
+	}
+
+	return ""
+}
+
+func getIdTokenFromContext(ctx context.Context) string {
+	v := ctx.Value(IdTokenContextVarName)
+	if v == nil {
+		return ""
+	}
+	if t, ok := v.(string); ok {
+		return t
+	}
+	return ""
+}
+
+func getRefreshTokenFromContext(ctx context.Context) string {
+	v := ctx.Value(RefreshTokenContextVarName)
+	if v == nil {
+		return ""
+	}
+	if t, ok := v.(string); ok {
+		return t
+	}
+	return ""
+}
+
+func checkAuthToken(task Task, accessToken string) bool {
+	if accessToken == "" {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.UnauthorizedError,
+		}
+		return false
+	}
+
+	_, err := jwksValidator.ValidateToken(accessToken)
+
+	if err != nil {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "invalid token", err),
+		}
+		return false
+	}
+
+	return true
+}
+
+func checkAuthContextValue(task Task) (string, bool) {
+	accessToken, authErr := resolveAuthTokenFromContext(task.Context)
+
+	if authErr != nil {
+		task.ResultChan <- TaskResult{
+			Err: authErr,
+		}
+		return "", false
+	}
+
+	return accessToken, checkAuthToken(task, accessToken)
+}
+
+func authResultToAuthTokenSet(authResult *cognitoTypes.AuthenticationResultType) (*loginTypes.AuthTokenSet, error) {
+	result := loginTypes.AuthTokenSet{
 		AccessToken: *authResult.AccessToken,
 		IdToken:     *authResult.IdToken,
 	}
+
+	if authToken, err := jwksValidator.ParseToken(*authResult.AccessToken); err == nil {
+		if authExpires, err := authToken.Claims.GetExpirationTime(); err == nil {
+			result.AccessTokenExpires = authExpires.Time
+		}
+	} else {
+		return nil, err
+	}
+
+	if idToken, err := jwksValidator.ParseToken(*authResult.IdToken); err == nil {
+		if authExpires, err := idToken.Claims.GetExpirationTime(); err == nil {
+			result.IdTokenExpires = authExpires.Time
+		}
+	} else {
+		return nil, err
+	}
+
 	if authResult.RefreshToken != nil {
 		result.RefreshToken = *authResult.RefreshToken
+		var expiryDuration time.Duration
+		if poolClientDescription.TokenValidityUnits == nil {
+			expiryDuration = getDurationFromTokenValidity(poolClientDescription.RefreshTokenValidity, cognitoTypes.TimeUnitsTypeDays)
+		} else {
+			expiryDuration = getDurationFromTokenValidity(poolClientDescription.RefreshTokenValidity, poolClientDescription.TokenValidityUnits.RefreshToken)
+		}
+		result.RefreshTokenExpires = time.Now().Add(expiryDuration)
 	}
-	return result
+	return &result, nil
 }
 
-func handleChallenge(challenge cognitoTypes.ChallengeNameType, challengeParameters map[string]string, task Task, cognitoSessions string) {
+func getDurationFromTokenValidity(tokenValidity int32, unitType cognitoTypes.TimeUnitsType) time.Duration {
+	switch unitType {
+	case "":
+		fallthrough
+	case cognitoTypes.TimeUnitsTypeDays:
+		return time.Duration(tokenValidity) * time.Hour * 24
+	case cognitoTypes.TimeUnitsTypeHours:
+		return time.Duration(tokenValidity) * time.Hour
+	case cognitoTypes.TimeUnitsTypeMinutes:
+		return time.Duration(tokenValidity) * time.Minute
+	case cognitoTypes.TimeUnitsTypeSeconds:
+		return time.Duration(tokenValidity) * time.Second
+	}
+	panic(fmt.Sprintf("invalid token validity unit type: %s", unitType))
+}
+
+func authResultToMasqueradedToken(ctx context.Context, authResult *cognitoTypes.AuthenticationResultType, user string) (*loginTypes.MasqueradedToken, error) {
+	key, err := masquerade.GetNewKey(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var expires time.Time
+	tokenSet := make(masquerade.TokenSet, 3)
+
+	authTokenRecord := masquerade.TokenRecord{
+		Value: *authResult.AccessToken,
+	}
+	idTokenRecord := masquerade.TokenRecord{
+		Value: *authResult.IdToken,
+	}
+
+	if authToken, err := jwksValidator.ParseToken(*authResult.AccessToken); err == nil {
+		if tokenExpires, err := authToken.Claims.GetExpirationTime(); err == nil {
+			authTokenRecord.Expires = tokenExpires.Time
+			if tokenExpires.Time.After(expires) {
+				expires = tokenExpires.Time
+			}
+		}
+	} else {
+		return nil, err
+	}
+
+	if idToken, err := jwksValidator.ParseToken(*authResult.IdToken); err == nil {
+		if tokenExpires, err := idToken.Claims.GetExpirationTime(); err == nil {
+			idTokenRecord.Expires = tokenExpires.Time
+			if tokenExpires.Time.After(expires) {
+				expires = tokenExpires.Time
+			}
+		}
+	} else {
+		return nil, err
+	}
+
+	tokenSet[loginTypes.AuthTokenType] = authTokenRecord
+	tokenSet[loginTypes.IDTokenType] = idTokenRecord
+
+	if authResult.RefreshToken != nil {
+		var expiryDuration time.Duration
+		if poolClientDescription.TokenValidityUnits == nil {
+			expiryDuration = getDurationFromTokenValidity(poolClientDescription.RefreshTokenValidity, cognitoTypes.TimeUnitsTypeDays)
+		} else {
+			expiryDuration = getDurationFromTokenValidity(poolClientDescription.RefreshTokenValidity, poolClientDescription.TokenValidityUnits.RefreshToken)
+		}
+		tokenExpires := time.Now().Add(expiryDuration)
+
+		if tokenExpires.After(expires) {
+			expires = tokenExpires
+		}
+
+		tokenSet[loginTypes.RefreshTokenType] = masquerade.TokenRecord{
+			Value:   *authResult.RefreshToken,
+			Expires: expires,
+		}
+	}
+
+	mr := &masquerade.MasqueradedRecord{
+		Tokens: tokenSet,
+		User:   user,
+	}
+
+	err = masquerade.GetStorage().StoreMasqueradedRecord(ctx, key, mr, expires)
+	if err != nil {
+		return nil, err
+	}
+
+	return &loginTypes.MasqueradedToken{
+		Token:        key,
+		TokenExpires: expires,
+	}, nil
+}
+
+func authResultToPayload(ctx context.Context, authResult *cognitoTypes.AuthenticationResultType, user string) (interface{}, error) {
+	if config.UseCookies() && config.UseMasquerade() {
+		return authResultToMasqueradedToken(ctx, authResult, user)
+	}
+	return authResultToAuthTokenSet(authResult)
+}
+
+func handleAuthResults(task Task, authResults *cognitoTypes.AuthenticationResultType, user string, remember bool) {
+	authPayload, err := authResultToPayload(task.Context, authResults, user)
+	handleAuthPayload(task, authPayload, remember, err)
+}
+
+func handleAuthPayload(task Task, authPayload interface{}, remember bool, err error) {
+	if err != nil {
+		task.ResultChan <- TaskResult{
+			Err:   loginTypes.NewInternalError(err.Error(), err),
+			Flags: AuthInfoTaskResultFlag | LogoutTaskResultFlag,
+		}
+		return
+	}
+	flg := AuthInfoTaskResultFlag
+	if remember {
+		flg |= RememberTaskResultFlag
+	}
+	task.ResultChan <- TaskResult{
+		Payload: authPayload,
+		Flags:   flg,
+	}
+}
+
+func tokenSetToAuthPayload(tokenSet masquerade.TokenSet, appendRefreshToken bool) *loginTypes.AuthTokenSet {
+	r := &loginTypes.AuthTokenSet{
+		AccessToken:        tokenSet[loginTypes.AuthTokenType].Value,
+		AccessTokenExpires: tokenSet[loginTypes.AuthTokenType].Expires,
+		IdToken:            tokenSet[loginTypes.IDTokenType].Value,
+		IdTokenExpires:     tokenSet[loginTypes.IDTokenType].Expires,
+	}
+	if appendRefreshToken {
+		if s, ok := tokenSet[loginTypes.RefreshTokenType]; ok {
+			r.RefreshToken = s.Value
+			r.RefreshTokenExpires = s.Expires
+		}
+	}
+	return r
+}
+
+func handleChallenge(challenge cognitoTypes.ChallengeNameType, challengeParameters map[string]string, task Task, cognitoSessions string, sessionKey string, rememberUser bool) {
 
 	if challenge == "" {
 		task.ResultChan <- TaskResult{
@@ -67,7 +323,7 @@ func handleChallenge(challenge cognitoTypes.ChallengeNameType, challengeParamete
 	}
 
 	tr := TaskResult{
-		SessionKey: task.SessionKey,
+		SessionKey: sessionKey,
 	}
 
 	var sessionTag interface{} = nil
@@ -128,7 +384,7 @@ func handleChallenge(challenge cognitoTypes.ChallengeNameType, challengeParamete
 		return
 	}
 
-	if err := sessionStorage.CreateLoginSession(task.Context, task.SessionKey, cognitoSessions, nextStep, time.Now().Add(loginSessionValidFor), sessionTag); err != nil {
+	if err := sessionStorage.CreateLoginSession(task.Context, sessionKey, cognitoSessions, nextStep, rememberUser, time.Now().Add(loginSessionValidFor), sessionTag); err != nil {
 		task.ResultChan <- TaskResult{
 			Err: loginTypes.NewInternalError("failed to create login session", err),
 		}
@@ -139,8 +395,8 @@ func handleChallenge(challenge cognitoTypes.ChallengeNameType, challengeParamete
 	task.ResultChan <- tr
 }
 
-func getLoginSession(t Task) *LoginSession {
-	session, err := sessionStorage.GetLoginSession(t.Context, t.SessionKey)
+func getLoginSession(t Task, sessionKey string) *LoginSession {
+	session, err := sessionStorage.GetLoginSession(t.Context, sessionKey)
 	if err != nil {
 		t.ResultChan <- TaskResult{
 			Err: loginTypes.NewInternalError("failed to retrieve login session", err),
@@ -193,8 +449,12 @@ func checkTaskContext(t Task) bool {
 	return true
 }
 
+func getRequestLoggerFromContext(ctx context.Context) *zap.Logger {
+	return getRequestLogger(ctx).Named("processors")
+}
+
 func getRequestLoggerFromTask(task Task) *zap.Logger {
-	return getRequestLogger(task.Context).Named("processors")
+	return getRequestLoggerFromContext(task.Context)
 }
 
 func processLoginTask(task loginTask) {
@@ -242,9 +502,7 @@ func processLoginTask(task loginTask) {
 
 	if result.ChallengeName == "" {
 		if result.AuthenticationResult != nil {
-			task.ResultChan <- TaskResult{
-				Payload: authResultToTokenSet(result.AuthenticationResult),
-			}
+			handleAuthResults(task.Task, result.AuthenticationResult, task.User, task.RememberUser)
 			return
 		} else {
 			task.ResultChan <- TaskResult{
@@ -254,7 +512,7 @@ func processLoginTask(task loginTask) {
 		}
 	}
 
-	handleChallenge(result.ChallengeName, result.ChallengeParameters, task.Task, *result.Session)
+	handleChallenge(result.ChallengeName, result.ChallengeParameters, task.Task, *result.Session, task.SessionKey, task.RememberUser)
 }
 
 func processMFASetupTask(task mfaSetupTask) {
@@ -269,7 +527,7 @@ func processMFASetupTask(task mfaSetupTask) {
 
 	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
-	session := getLoginSession(task.Task)
+	session := getLoginSession(task.Task, task.SessionKey)
 
 	if session == nil || !checkNextStep(task.Task, session, NextStepMFASetup) {
 		return
@@ -290,7 +548,7 @@ func processMFASetupTask(task mfaSetupTask) {
 			return
 		}
 
-		if err := sessionStorage.CreateLoginSession(task.Context, task.SessionKey, *associateResult.Session, NextStepMFASoftwareTokenSetupVerify, time.Now().Add(loginSessionValidFor), nil); err != nil {
+		if err := sessionStorage.CreateLoginSession(task.Context, task.SessionKey, *associateResult.Session, NextStepMFASoftwareTokenSetupVerify, session.RememberUser, time.Now().Add(loginSessionValidFor), nil); err != nil {
 			task.ResultChan <- TaskResult{
 				Err: loginTypes.NewInternalError("failed to create login session", err),
 			}
@@ -322,7 +580,7 @@ func processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoftwareTokenTask
 
 	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
-	session := getLoginSession(task.Task)
+	session := getLoginSession(task.Task, task.SessionKey)
 	if session == nil || !checkNextStep(task.Task, session, NextStepMFASoftwareTokenSetupVerify) {
 		return
 	}
@@ -377,13 +635,11 @@ func processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoftwareTokenTask
 	}
 
 	if finalResult.AuthenticationResult != nil {
-		task.ResultChan <- TaskResult{
-			Payload: authResultToTokenSet(finalResult.AuthenticationResult),
-		}
+		handleAuthResults(task.Task, finalResult.AuthenticationResult, task.User, session.RememberUser)
 		return
 	}
 
-	handleChallenge(finalResult.ChallengeName, finalResult.ChallengeParameters, task.Task, *finalResult.Session)
+	handleChallenge(finalResult.ChallengeName, finalResult.ChallengeParameters, task.Task, *finalResult.Session, task.SessionKey, session.RememberUser)
 }
 
 func verifyMFACode(session *LoginSession, task mfaVerifyTask, step NextStep) {
@@ -424,9 +680,7 @@ func verifyMFACode(session *LoginSession, task mfaVerifyTask, step NextStep) {
 
 	if result.ChallengeName == "" {
 		if result.AuthenticationResult != nil {
-			task.ResultChan <- TaskResult{
-				Payload: authResultToTokenSet(result.AuthenticationResult),
-			}
+			handleAuthResults(task.Task, result.AuthenticationResult, task.User, session.RememberUser)
 			return
 		} else {
 			task.ResultChan <- TaskResult{
@@ -436,7 +690,7 @@ func verifyMFACode(session *LoginSession, task mfaVerifyTask, step NextStep) {
 		}
 	}
 
-	handleChallenge(result.ChallengeName, result.ChallengeParameters, task.Task, *result.Session)
+	handleChallenge(result.ChallengeName, result.ChallengeParameters, task.Task, *result.Session, task.SessionKey, session.RememberUser)
 }
 
 func processMFAVerifyTask(task mfaVerifyTask) {
@@ -453,7 +707,7 @@ func processMFAVerifyTask(task mfaVerifyTask) {
 		return
 	}
 
-	session := getLoginSession(task.Task)
+	session := getLoginSession(task.Task, task.SessionKey)
 	if session == nil {
 		return
 	}
@@ -473,6 +727,45 @@ func processMFAVerifyTask(task mfaVerifyTask) {
 	}
 }
 
+func refreshToken(ctx context.Context, token string, user string) (*cognitoTypes.AuthenticationResultType, error) {
+	if useAuthToRefresh {
+		input := &cognitoidentityprovider.InitiateAuthInput{
+			AuthFlow: cognitoTypes.AuthFlowTypeRefreshTokenAuth,
+			ClientId: aws.String(cognitoClientID),
+			AuthParameters: map[string]string{
+				"REFRESH_TOKEN": token,
+			},
+		}
+
+		if cognitoClientSecret != "" {
+			input.AuthParameters["SECRET_HASH"] = computeSecretHash(cognitoClientSecret, user, cognitoClientID)
+		}
+
+		result, err := cognitoClient.InitiateAuth(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		return result.AuthenticationResult, nil
+	} else {
+		input := &cognitoidentityprovider.GetTokensFromRefreshTokenInput{
+			ClientId:     aws.String(cognitoClientID),
+			RefreshToken: aws.String(token),
+		}
+
+		if cognitoClientSecret != "" {
+			input.ClientSecret = aws.String(cognitoClientSecret)
+		}
+
+		result, err := cognitoClient.GetTokensFromRefreshToken(ctx, input)
+
+		if err != nil {
+			return nil, err
+		}
+		return result.AuthenticationResult, nil
+	}
+}
+
+// todo: rework for cookies
 func processRefreshTokenTask(task refreshTokenTask) {
 	if !checkTaskContext(task.Task) {
 		return
@@ -480,46 +773,9 @@ func processRefreshTokenTask(task refreshTokenTask) {
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	var err error
-	var authResult *cognitoTypes.AuthenticationResultType
-
 	requestLogger.Log(processingLogLevel, "processing", zap.String("username", task.User))
 
-	if useAuthToRefresh {
-		input := &cognitoidentityprovider.InitiateAuthInput{
-			AuthFlow: cognitoTypes.AuthFlowTypeRefreshTokenAuth,
-			ClientId: aws.String(cognitoClientID),
-			AuthParameters: map[string]string{
-				"REFRESH_TOKEN": task.RefreshToken,
-			},
-		}
-
-		if cognitoClientSecret != "" {
-			input.AuthParameters["SECRET_HASH"] = computeSecretHash(cognitoClientSecret, task.User, cognitoClientID)
-		}
-
-		var result *cognitoidentityprovider.InitiateAuthOutput
-		result, err = cognitoClient.InitiateAuth(task.Context, input)
-		if err == nil {
-			authResult = result.AuthenticationResult
-		}
-	} else {
-		input := &cognitoidentityprovider.GetTokensFromRefreshTokenInput{
-			ClientId:     aws.String(cognitoClientID),
-			RefreshToken: aws.String(task.RefreshToken),
-		}
-
-		if cognitoClientSecret != "" {
-			input.ClientSecret = aws.String(cognitoClientSecret)
-		}
-
-		var result *cognitoidentityprovider.GetTokensFromRefreshTokenOutput
-		result, err = cognitoClient.GetTokensFromRefreshToken(task.Context, input)
-
-		if err == nil {
-			authResult = result.AuthenticationResult
-		}
-	}
+	authResult, err := refreshToken(task.Context, task.RefreshToken, task.User)
 
 	if err != nil {
 		task.ResultChan <- TaskResult{
@@ -529,9 +785,7 @@ func processRefreshTokenTask(task refreshTokenTask) {
 	}
 
 	if authResult != nil {
-		task.ResultChan <- TaskResult{
-			Payload: authResultToTokenSet(authResult),
-		}
+		handleAuthResults(task.Task, authResult, task.User, false) //todo: remember only if using cookies and cookies have max age
 		return
 	}
 
@@ -552,7 +806,7 @@ func processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUpdateRequestTa
 
 	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("username", task.User))
 
-	session := getLoginSession(task.Task)
+	session := getLoginSession(task.Task, task.SessionKey)
 	if session == nil || !checkNextStep(task.Task, session, NextStepNewPassword) {
 		return
 	}
@@ -597,9 +851,7 @@ func processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUpdateRequestTa
 
 	if result.ChallengeName == "" {
 		if result.AuthenticationResult != nil {
-			task.ResultChan <- TaskResult{
-				Payload: authResultToTokenSet(result.AuthenticationResult),
-			}
+			handleAuthResults(task.Task, result.AuthenticationResult, task.User, session.RememberUser)
 			return
 		} else {
 			task.ResultChan <- TaskResult{
@@ -609,7 +861,7 @@ func processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUpdateRequestTa
 		}
 	}
 
-	handleChallenge(result.ChallengeName, result.ChallengeParameters, task.Task, *result.Session)
+	handleChallenge(result.ChallengeName, result.ChallengeParameters, task.Task, *result.Session, task.SessionKey, session.RememberUser)
 }
 
 func processLogOutTask(task logOutTask) {
@@ -623,9 +875,29 @@ func processLogOutTask(task logOutTask) {
 
 	//always report success
 	go func() {
+		token := task.RefreshToken
+
+		if token == "" {
+			if msq := getMasqueradedTokenFromContext(task.Context); msq != "" {
+				r, err := unmaskToken(task.Context, msq, requestLogger, false)
+				if err != nil {
+					requestLogger.Warn("failed to unmask token to rewoke", zap.Error(err))
+					return
+				}
+				dropMasqueradedToken(msq, requestLogger)
+				token = r.RefreshToken
+			} else if rt := getRefreshTokenFromContext(task.Context); rt != "" {
+				token = rt
+			} else {
+				requestLogger.Warn("no token provide in body and no token to unmask")
+				return
+			}
+
+		}
+
 		input := &cognitoidentityprovider.RevokeTokenInput{
 			ClientId: aws.String(cognitoClientID),
-			Token:    aws.String(task.RefreshToken),
+			Token:    aws.String(token),
 		}
 
 		if cognitoClientSecret != "" {
@@ -639,7 +911,9 @@ func processLogOutTask(task logOutTask) {
 		}
 	}()
 
-	task.ResultChan <- TaskResult{}
+	task.ResultChan <- TaskResult{
+		Flags: LogoutTaskResultFlag,
+	}
 }
 
 func processUpdatePasswordTask(task updatePasswordTask) {
@@ -651,22 +925,18 @@ func processUpdatePasswordTask(task updatePasswordTask) {
 
 	requestLogger.Log(processingLogLevel, "processing")
 
-	_, err := jwksValidator.ValidateToken(task.AccessToken)
-
-	if err != nil {
-		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "invalid token", err),
-		}
+	accessToken, ok := checkAuthContextValue(task.Task)
+	if !ok {
 		return
 	}
 
 	input := &cognitoidentityprovider.ChangePasswordInput{
-		AccessToken:      aws.String(task.AccessToken),
+		AccessToken:      aws.String(accessToken),
 		PreviousPassword: aws.String(task.CurrentPassword),
 		ProposedPassword: aws.String(task.NewPassword),
 	}
 
-	_, err = cognitoClient.ChangePassword(task.Context, input)
+	_, err := cognitoClient.ChangePassword(task.Context, input)
 
 	if err != nil {
 		task.ResultChan <- TaskResult{
@@ -687,7 +957,12 @@ func processGetMFAStatusTask(task getMFAStatusTask) {
 
 	requestLogger.Log(processingLogLevel, "processing")
 
-	token, err := jwksValidator.ValidateToken(task.AccessToken)
+	accessToken, ok := checkAuthContextValue(task.Task)
+	if !ok {
+		return
+	}
+
+	token, err := jwksValidator.ValidateToken(accessToken)
 
 	var username string
 
@@ -770,8 +1045,13 @@ func processGetMFAStatusTask(task getMFAStatusTask) {
 }
 
 func updateSoftwareToken(task updateMFASoftwareTokenTask) {
+	accessToken, ok := checkAuthContextValue(task.Task)
+	if !ok {
+		return
+	}
+
 	associateInput := &cognitoidentityprovider.AssociateSoftwareTokenInput{
-		AccessToken: aws.String(task.AccessToken),
+		AccessToken: aws.String(accessToken),
 	}
 
 	associateResult, err := cognitoClient.AssociateSoftwareToken(context.TODO(), associateInput)
@@ -782,7 +1062,8 @@ func updateSoftwareToken(task updateMFASoftwareTokenTask) {
 		return
 	}
 
-	if err = sessionStorage.CreateLoginSession(task.Context, task.SessionKey, "", NextStepMFASoftwareTokenSetupVerify, time.Now().Add(loginSessionValidFor), nil); err != nil {
+	//todo: make separate type of session
+	if err = sessionStorage.CreateLoginSession(task.Context, task.SessionKey, "", NextStepMFASoftwareTokenSetupVerify, false, time.Now().Add(loginSessionValidFor), nil); err != nil {
 		task.ResultChan <- TaskResult{
 			Err: loginTypes.NewInternalError("failed to create login session", err),
 		}
@@ -819,8 +1100,13 @@ func processUpdateMFATask(task updateMFASoftwareTokenTask) {
 }
 
 func verifyMFASetupSoftwareToken(task verifyMFAUpdateTask) {
+	accessToken, ok := checkAuthContextValue(task.Task)
+	if !ok {
+		return
+	}
+
 	input := &cognitoidentityprovider.VerifySoftwareTokenInput{
-		AccessToken: aws.String(task.AccessToken),
+		AccessToken: aws.String(accessToken),
 		UserCode:    aws.String(task.Code),
 		//FriendlyDeviceName: aws.String("MyDevice"), // Optional device name
 	}
@@ -855,7 +1141,7 @@ func verifyMFASetupSoftwareToken(task verifyMFAUpdateTask) {
 		}
 
 		mfaPreferenceInput := &cognitoidentityprovider.SetUserMFAPreferenceInput{
-			AccessToken:              aws.String(task.AccessToken),
+			AccessToken:              aws.String(accessToken),
 			SoftwareTokenMfaSettings: softwareTokenSettings,
 		}
 
@@ -881,7 +1167,7 @@ func processVerifyUpdateMFATask(task verifyMFAUpdateTask) {
 
 	requestLogger.Log(processingLogLevel, "processing")
 
-	session := getLoginSession(task.Task)
+	session := getLoginSession(task.Task, task.SessionKey)
 	if session == nil {
 		return
 	}
@@ -911,7 +1197,7 @@ func processSelectMFATask(task selectMFATask) {
 
 	requestLogger.Log(processingLogLevel, "processing", zap.String("sessionKey", task.SessionKey), zap.String("mfaType", string(task.MFAType)))
 
-	session := getLoginSession(task.Task)
+	session := getLoginSession(task.Task, task.SessionKey)
 	if session == nil || !checkNextStep(task.Task, session, NextStepMFASelect) {
 		return
 	}
@@ -946,7 +1232,7 @@ func processSelectMFATask(task selectMFATask) {
 		return
 	}
 
-	handleChallenge(result.ChallengeName, result.ChallengeParameters, task.Task, *result.Session)
+	handleChallenge(result.ChallengeName, result.ChallengeParameters, task.Task, *result.Session, task.SessionKey, session.RememberUser)
 }
 
 func findUsersByEmail(ctx context.Context, email string) ([]cognitoTypes.UserType, loginTypes.GenericError) {
@@ -1167,4 +1453,159 @@ func processFinalizePasswordResetTask(task finalizePasswordResetTask) {
 	)
 
 	task.ResultChan <- TaskResult{}
+}
+
+func dropMasqueradedToken(token string, requestLogger *zap.Logger) {
+	err := masquerade.GetStorage().DropMasqueradedRecord(context.Background(), token)
+	if err != nil {
+		requestLogger.Error("failed to drop masqueraded token", zap.Error(err))
+	}
+}
+
+func unmaskToken(ctx context.Context, token string, requestLogger *zap.Logger, refresh bool) (*loginTypes.AuthTokenSet, loginTypes.GenericError) {
+	if token == "" {
+		return nil, loginTypes.UnauthorizedError
+	}
+
+	d, err := masquerade.GetStorage().GetMasqueradedRecord(ctx, token)
+	if err != nil {
+		return nil, loginTypes.NewInternalError(err.Error(), err)
+	}
+
+	if d == nil {
+		return nil, loginTypes.InvalidTokenMaskError
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	refreshRequired := false
+
+	if !d.Tokens[loginTypes.AuthTokenType].Expires.After(deadline) {
+		refreshRequired = true
+	}
+
+	if !d.Tokens[loginTypes.IDTokenType].Expires.After(deadline) {
+		refreshRequired = true
+	}
+
+	if refresh && refreshRequired {
+		requestLogger.Log(processingLogLevel, "refresh required")
+		if rt, ok := d.Tokens[loginTypes.RefreshTokenType]; ok {
+			var ttl time.Duration
+			if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
+				ttl = deadline.Sub(time.Now())
+			} else {
+				ttl = 60 * time.Second
+			}
+
+			ro := locking.GetReturnOnce[*cognitoTypes.AuthenticationResultType](token, ttl)
+			authResults, err := ro.Do(ctx, func(ctx context.Context) (*cognitoTypes.AuthenticationResultType, error) {
+				return refreshToken(ctx, rt.Value, d.User)
+			})
+
+			if err != nil {
+				return nil, loginTypes.NewGenericAuthenticationError(err.Error(), "authentication error", err)
+			}
+
+			r, err := authResultToAuthTokenSet(authResults)
+			if err != nil {
+				return nil, loginTypes.NewGenericAuthenticationError(err.Error(), "authentication error", err)
+			}
+
+			return r, nil
+		} else {
+			return nil, loginTypes.NewGenericAuthenticationError("unable to refresh tokens - no refresh token", "unauthorized", nil)
+		}
+	}
+
+	return tokenSetToAuthPayload(d.Tokens, masquerade.UnmaskRefreshToken()), nil
+}
+
+func processUnmaskTokenTask(task unmaskTokenTask) {
+	if !checkTaskContext(task.Task) {
+		return
+	}
+
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
+	requestLogger.Log(processingLogLevel, "processing")
+
+	r, err := unmaskToken(task.Context, task.Token, requestLogger, true)
+	//todo: add option to remember unmasked token
+	handleAuthPayload(task.Task, r, false, err)
+}
+
+func cognitoIdTokenToProfile(token string) (map[string]interface{}, error) {
+	t, err := jwksValidator.ValidateToken(token)
+	if err != nil {
+		return nil, err
+	}
+
+	claimsMap, ok := t.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, errors.New("invalid token")
+	}
+
+	r := map[string]interface{}{
+		"groups":        claimsMap["cognito:groups"],
+		"username":      claimsMap["cognito:username"],
+		"email":         claimsMap["email"],
+		"emailVerified": claimsMap["email_verified"],
+	}
+
+	return r, nil
+}
+
+func processGetProfileTask(task getProfileTask) {
+	if !checkTaskContext(task.Task) {
+		return
+	}
+
+	requestLogger := getRequestLoggerFromTask(task.Task)
+
+	requestLogger.Log(processingLogLevel, "processing")
+
+	var idToken string
+
+	msq := getMasqueradedTokenFromContext(task.Context)
+	if msq == "" {
+		_, ok := checkAuthContextValue(task.Task)
+		if !ok {
+			return
+		}
+		idToken = getIdTokenFromContext(task.Context)
+	} else {
+		r, err := unmaskToken(task.Context, getMasqueradedTokenFromContext(task.Context), requestLogger, true)
+
+		if err != nil {
+			task.ResultChan <- TaskResult{
+				Err: err,
+			}
+			return
+		}
+
+		if !checkAuthToken(task.Task, r.AccessToken) {
+			return
+		}
+
+		idToken = r.IdToken
+	}
+
+	if idToken == "" {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewBadRequestError("no id token provided", "no id token provided", nil),
+		}
+		return
+	}
+
+	t, jwksErr := cognitoIdTokenToProfile(idToken)
+	if jwksErr != nil {
+		task.ResultChan <- TaskResult{
+			Err: loginTypes.NewInternalError(jwksErr.Error(), jwksErr),
+		}
+		return
+	}
+
+	task.ResultChan <- TaskResult{
+		Payload: t,
+	}
 }

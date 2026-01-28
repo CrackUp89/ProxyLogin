@@ -1,9 +1,27 @@
 package types
 
-type TokenSet struct {
-	AccessToken  string `json:"access_token,omitempty"`
-	IdToken      string `json:"id_token,omitempty"`
-	RefreshToken string `json:"refresh_token,omitempty"`
+import "time"
+
+type TokenType string
+
+const (
+	AuthTokenType    TokenType = "auth"
+	IDTokenType      TokenType = "id"
+	RefreshTokenType TokenType = "refresh"
+)
+
+type AuthTokenSet struct {
+	AccessToken         string    `json:"access_token,omitempty"`
+	AccessTokenExpires  time.Time `json:"access_token_expires,omitempty"`
+	IdToken             string    `json:"id_token,omitempty"`
+	IdTokenExpires      time.Time `json:"id_token_expires,omitempty"`
+	RefreshToken        string    `json:"refresh_token,omitempty"`
+	RefreshTokenExpires time.Time `json:"refresh_token_expires_in,omitempty"`
+}
+
+type MasqueradedToken struct {
+	Token        string    `json:"token,omitempty"`
+	TokenExpires time.Time `json:"token_expires,omitempty"`
 }
 
 type ErrorType string
@@ -204,3 +222,43 @@ func (i invalidVerificationCodeError) Type() ErrorType {
 }
 
 var InvalidVerificationCodeError = invalidVerificationCodeError{}
+
+type unauthorizedError struct{}
+
+func (i unauthorizedError) Error() string {
+	return "unauthorized"
+}
+
+func (i unauthorizedError) PrivateError() string {
+	return "unauthorized"
+}
+
+func (i unauthorizedError) Code() int {
+	return 1006
+}
+
+func (i unauthorizedError) Type() ErrorType {
+	return AuthErrorType
+}
+
+var UnauthorizedError = unauthorizedError{}
+
+type invalidTokenMaskError struct{}
+
+func (i invalidTokenMaskError) Error() string {
+	return "invalid token"
+}
+
+func (i invalidTokenMaskError) PrivateError() string {
+	return "invalid token mask"
+}
+
+func (i invalidTokenMaskError) Code() int {
+	return 1007
+}
+
+func (i invalidTokenMaskError) Type() ErrorType {
+	return AuthErrorType
+}
+
+var InvalidTokenMaskError = invalidTokenMaskError{}

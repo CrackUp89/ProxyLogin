@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
 
@@ -27,38 +26,13 @@ func getSessionsLogger() *zap.Logger {
 
 type SessionStorage interface {
 	GetLoginSession(ctx context.Context, loginSession string) (*LoginSession, error)
-	CreateLoginSession(ctx context.Context, loginSessionKey string, cognitoSession string, nextStep NextStep, expires time.Time, tag interface{}) error
+	CreateLoginSession(ctx context.Context, loginSessionKey string, cognitoSession string, nextStep NextStep, rememberUser bool, expires time.Time, tag interface{}) error
 	GetResetPasswordSession(ctx context.Context, token string) (*InitiateResetPasswordSession, error)
 	CreateResetPasswordSession(ctx context.Context, resetPasswordSessionKey string, user string, email string, expires time.Time) error
 	DropResetPasswordSession(ctx context.Context, token string) error
 }
 
 var sessionStorage SessionStorage
-
-type storageType string
-
-var (
-	MEMORY storageType = "memory"
-	REDIS  storageType = "redis"
-)
-
-func init() {
-	viper.SetDefault("cognito.sessions.storage", MEMORY)
-}
-
-func loadSessionSettings() {
-	switch storageType(viper.GetString("cognito.sessions.storage")) {
-	case MEMORY:
-		sessionStorage = NewLocalSessionStore()
-		startLocalStorageCleanupRoutine()
-		break
-	case REDIS:
-		sessionStorage = NewRedisSessionStore()
-		break
-	default:
-		panic("invalid storage type")
-	}
-}
 
 type withValidityTimeframe interface {
 	GetStartTime() time.Time
@@ -68,7 +42,7 @@ type withValidityTimeframe interface {
 func cleanupExpiredSessions[T withValidityTimeframe](sessions *sync.Map) {
 	sessions.Range(func(k, v interface{}) bool {
 		session := v.(T)
-		if session.GetStartTime().After(time.Now()) {
+		if session.GetExpirationTime().Before(time.Now()) {
 			getSessionsLogger().Info("session expired",
 				zap.String("session", k.(string)),
 				zap.String("type", fmt.Sprint(reflect.TypeOf(session))))
@@ -116,6 +90,7 @@ type LoginSession struct {
 	Created        time.Time   `json:"created"`
 	Expires        time.Time   `json:"expires"`
 	NextStep       NextStep    `json:"nextStep"`
+	RememberUser   bool        `json:"rememberUser"`
 	Tag            interface{} `json:"tag"`
 }
 
@@ -167,12 +142,13 @@ func (l *LocalSessionStore) GetLoginSession(_ context.Context, loginSession stri
 	return nil, nil
 }
 
-func (l *LocalSessionStore) CreateLoginSession(_ context.Context, loginSessionKey string, cognitoSession string, nextStep NextStep, expires time.Time, tag interface{}) error {
+func (l *LocalSessionStore) CreateLoginSession(_ context.Context, loginSessionKey string, cognitoSession string, nextStep NextStep, rememberUser bool, expires time.Time, tag interface{}) error {
 	l.activeLoginSessions.Store(loginSessionKey,
 		&LoginSession{cognitoSession,
 			time.Now(),
 			expires,
 			nextStep,
+			rememberUser,
 			tag})
 	return nil
 }
@@ -235,13 +211,14 @@ func (r *RedisSessionStore) GetLoginSession(ctx context.Context, loginSession st
 	return nil, nil
 }
 
-func (r *RedisSessionStore) CreateLoginSession(ctx context.Context, loginSessionKey string, cognitoSession string, nextStep NextStep, expires time.Time, tag interface{}) error {
+func (r *RedisSessionStore) CreateLoginSession(ctx context.Context, loginSessionKey string, cognitoSession string, nextStep NextStep, rememberUser bool, expires time.Time, tag interface{}) error {
 	key := rds.BuildKey(loginSessionPrefix, loginSessionKey)
 	session := &LoginSession{
 		CognitoSession: cognitoSession,
 		Created:        time.Now(),
 		Expires:        expires,
 		NextStep:       nextStep,
+		RememberUser:   rememberUser,
 		Tag:            tag,
 	}
 

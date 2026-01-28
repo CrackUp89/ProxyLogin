@@ -68,6 +68,12 @@ func startWorker() chan bool {
 			case t := <-finalizePasswordResetTasks:
 				processFinalizePasswordResetTask(t)
 				break
+			case t := <-unmaskTokenTasks:
+				processUnmaskTokenTask(t)
+				break
+			case t := <-getProfileTasks:
+				processGetProfileTask(t)
+				break
 			case <-stopChannel:
 				return
 			}

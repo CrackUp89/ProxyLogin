@@ -3,12 +3,14 @@ package cognito
 import (
 	"context"
 	"net/http"
+	"proxylogin/internal/manager/config"
 	"proxylogin/internal/manager/login/passwordreset"
 	"proxylogin/internal/manager/login/types"
+	"proxylogin/internal/manager/ratelimiter"
 	"proxylogin/internal/manager/tools"
 	httpTools "proxylogin/internal/manager/tools/http"
 	"proxylogin/internal/manager/tools/json"
-	"proxylogin/internal/manager/tools/ratelimiter"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -61,6 +63,24 @@ func getRequestLogger(ctx context.Context) *zap.Logger {
 	return l
 }
 
+func getAuthTokenFromContext(ctx context.Context) string {
+	auth := ctx.Value(AuthContextVarName)
+
+	if auth == nil {
+		return ""
+	}
+
+	if t, ok := auth.(TokenAuth); ok {
+		return t.Token
+	}
+
+	if t, ok := auth.(MasqueradedAuth); ok {
+		return t.Token
+	}
+
+	panic("unknown auth type")
+}
+
 func processError(w http.ResponseWriter, err types.GenericError, ctx context.Context) bool {
 	if err != nil {
 		requestLogger := getRequestLogger(ctx)
@@ -102,6 +122,18 @@ func processTaskResponse(w http.ResponseWriter, result TaskResult, ctx context.C
 		return
 	}
 
+	if result.Flags.Has(AuthInfoTaskResultFlag) {
+		processAuthResponse(ctx, w, result)
+		return
+	}
+
+	if result.Flags.Has(LogoutTaskResultFlag) && config.UseCookies() {
+		http.SetCookie(w, dropCookie(config.GetMasqueradedCookieName()))
+		http.SetCookie(w, dropCookie(config.GetAccessTokenCookieName()))
+		http.SetCookie(w, dropCookie(config.GetRefreshTokenCookieName()))
+		http.SetCookie(w, dropCookie(config.GetIDTokenCookieName()))
+	}
+
 	logTransportError(httpTools.WriteJSON(w, NextStepResponse{
 		NextStep: result.NextStep,
 		Session:  result.SessionKey,
@@ -109,7 +141,7 @@ func processTaskResponse(w http.ResponseWriter, result TaskResult, ctx context.C
 	}), ctx)
 }
 
-func decodeAndValidate[T WithValidation](w http.ResponseWriter, r *http.Request) (T, bool) {
+func decodeAndValidate[T WithValidation](r *http.Request) (T, error) {
 	ctx := r.Context()
 	requestLogger := getRequestLogger(ctx)
 
@@ -117,17 +149,27 @@ func decodeAndValidate[T WithValidation](w http.ResponseWriter, r *http.Request)
 
 	if err != nil {
 		requestLogger.Warn("malformed JSON", zap.Error(err))
-		logTransportError(httpTools.WriteBadRequest(w, err), ctx)
-		return value, false
+		return value, err
 	}
 
 	if issues := value.Validate(); len(issues) > 0 {
 		requestLogger.Warn("invalid request params", zap.Error(err))
-		logTransportError(httpTools.WriteBadRequest(w, types.NewValidationError(issues)), r.Context())
-		return value, false
+		return value, types.NewValidationError(issues)
 	}
 
-	return value, true
+	return value, nil
+}
+
+func decodeAndProcessValidationErrors[T WithValidation](w http.ResponseWriter, r *http.Request) (T, bool) {
+	d, err := decodeAndValidate[T](r)
+	ctx := r.Context()
+
+	if err != nil {
+		logTransportError(httpTools.WriteBadRequest(w, types.NewBadRequestError(err.Error(), err.Error(), err)), ctx)
+		return d, false
+	}
+
+	return d, true
 }
 
 func attachLoggerContextToRequest(r *http.Request) *http.Request {
@@ -160,6 +202,97 @@ func processLimiter(limiter ratelimiter.Limiter, key string, w http.ResponseWrit
 	return true, nil
 }
 
+func createCookie(name string, val string, expires time.Time) *http.Cookie {
+	result := &http.Cookie{
+		Name:     name,
+		Value:    val,
+		HttpOnly: config.UseHTTPOnlyCookies(),
+		Path:     config.GetCookiePath(),
+		Secure:   config.GetCookieSecure(),
+		SameSite: config.GetCookieSameSite(),
+	}
+
+	domain := config.GetCookieDomain()
+	if domain != "" {
+		result.Domain = domain
+	}
+
+	if !expires.IsZero() {
+		result.MaxAge = int(expires.Sub(time.Now()) / time.Second)
+		result.Expires = expires
+	}
+
+	return result
+}
+
+func dropCookie(name string) *http.Cookie {
+	return &http.Cookie{
+		Name:     name,
+		HttpOnly: config.UseHTTPOnlyCookies(),
+		Path:     config.GetCookiePath(),
+		Secure:   config.GetCookieSecure(),
+		SameSite: config.GetCookieSameSite(),
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+	}
+}
+
+func processAuthResponse(ctx context.Context, w http.ResponseWriter, taskResult TaskResult) bool {
+	if taskResult.Err == nil && taskResult.Payload != nil {
+		remember := taskResult.Flags.Has(RememberTaskResultFlag)
+		if p, ok := taskResult.Payload.(*types.MasqueradedToken); ok {
+			var expires time.Time
+			if remember {
+				expires = p.TokenExpires
+			} else {
+				expires = time.Time{}
+			}
+			http.SetCookie(w, createCookie(config.GetMasqueradedCookieName(), p.Token, expires))
+			logTransportError(httpTools.WriteJSON(w, loginResponse{
+				LoginType: MasqueradeLoginResponseLoginType,
+			}), ctx)
+			return true
+		}
+		if p, ok := taskResult.Payload.(*types.AuthTokenSet); ok {
+			if config.UseCookies() {
+
+				if p.RefreshToken != "" {
+					var refreshExpires time.Time
+					if remember {
+						refreshExpires = p.RefreshTokenExpires
+					} else {
+						refreshExpires = time.Time{}
+					}
+					http.SetCookie(w, createCookie(config.GetRefreshTokenCookieName(), p.RefreshToken, refreshExpires))
+				}
+
+				var accessExpires time.Time
+				var idExpires time.Time
+				if remember {
+					accessExpires = p.AccessTokenExpires
+					idExpires = p.IdTokenExpires
+				} else {
+					accessExpires = time.Time{}
+					idExpires = time.Time{}
+				}
+				http.SetCookie(w, createCookie(config.GetAccessTokenCookieName(), p.AccessToken, accessExpires))
+				http.SetCookie(w, createCookie(config.GetIDTokenCookieName(), p.IdToken, idExpires))
+
+				logTransportError(httpTools.WriteJSON(w, loginResponse{
+					LoginType: CookiesLoginResponseLoginType,
+				}), ctx)
+			} else {
+				logTransportError(httpTools.WriteJSON(w, loginResponse{
+					LoginType: TokenSetLoginResponseLoginType,
+					LoginData: p,
+				}), ctx)
+			}
+			return true
+		}
+	}
+	return false
+}
+
 func createLogin() http.Handler {
 	//originLimiter := ratelimiter.NewLimiter(rate.Every(10*time.Millisecond), 100)
 	userLimiter := ratelimiter.NewLimiter("createLoginUser", 2, time.Second)
@@ -176,7 +309,7 @@ func createLogin() http.Handler {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
-			value, ok := decodeAndValidate[loginRequest](w, r)
+			value, ok := decodeAndProcessValidationErrors[loginRequest](w, r)
 			if !ok {
 				return
 			}
@@ -189,15 +322,13 @@ func createLogin() http.Handler {
 				return
 			}
 
-			trc, err := AddLoginTask(r.Context(), newSessionKey(), value.User, value.Password)
+			trc, err := AddLoginTask(r.Context(), newSessionKey(), value.User, value.Password, value.Remember)
 
 			if !processError(w, err, r.Context()) {
 				return
 			}
 
-			taskResult := <-trc
-
-			processTaskResponse(w, taskResult, r.Context())
+			processTaskResponse(w, <-trc, r.Context())
 		})
 }
 
@@ -207,7 +338,7 @@ func createMFASetup() http.Handler {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
-			value, ok := decodeAndValidate[mfaSetupRequest](w, r)
+			value, ok := decodeAndProcessValidationErrors[mfaSetupRequest](w, r)
 			if !ok {
 				return
 			}
@@ -230,7 +361,7 @@ func createMFASetupVerifySoftwareToken() http.Handler {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
-			value, ok := decodeAndValidate[mfaSetupVerifySoftwareTokenRequest](w, r)
+			value, ok := decodeAndProcessValidationErrors[mfaSetupVerifySoftwareTokenRequest](w, r)
 			if !ok {
 				return
 			}
@@ -263,7 +394,7 @@ func createMFAVerify() http.Handler {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
-			value, ok := decodeAndValidate[mfaSoftwareTokenVerifyRequest](w, r)
+			value, ok := decodeAndProcessValidationErrors[mfaSoftwareTokenVerifyRequest](w, r)
 			if !ok {
 				return
 			}
@@ -288,7 +419,7 @@ func createMFAVerify() http.Handler {
 		})
 }
 
-func createRefreshToken() http.Handler {
+func createRefreshToken() http.Handler { //todo: rework for msq
 	userLimiter := ratelimiter.NewLimiter("createRefreshTokenUser", 5, time.Second)
 
 	return http.HandlerFunc(
@@ -298,7 +429,7 @@ func createRefreshToken() http.Handler {
 
 			r = attachLoggerContextToRequest(r)
 
-			value, ok := decodeAndValidate[refreshTokenRequest](w, r)
+			value, ok := decodeAndProcessValidationErrors[refreshTokenRequest](w, r)
 			if !ok {
 				return
 			}
@@ -311,7 +442,7 @@ func createRefreshToken() http.Handler {
 				return
 			}
 
-			trc, err := AddRefreshTokenTask(r.Context(), "", value.User, value.Token)
+			trc, err := AddRefreshTokenTask(r.Context(), value.User, value.Token)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -324,12 +455,17 @@ func createRefreshToken() http.Handler {
 func createLogOut() http.Handler {
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
-			value, ok := decodeAndValidate[logOutRequest](w, r)
-			if !ok {
-				return
+
+			var token string
+
+			if r.ContentLength > 0 {
+				value, requestErr := decodeAndValidate[logOutRequest](r)
+				if requestErr == nil {
+					token = value.Token
+				}
 			}
 
-			trc, err := AddLogOutTask(r.Context(), "", value.Token)
+			trc, err := AddLogOutTask(r.Context(), token)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -345,7 +481,7 @@ func createSatisfyPasswordUpdateRequest() http.Handler {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
-			value, ok := decodeAndValidate[satisfyPasswordUpdateRequest](w, r)
+			value, ok := decodeAndProcessValidationErrors[satisfyPasswordUpdateRequest](w, r)
 			if !ok {
 				return
 			}
@@ -368,11 +504,11 @@ func createUpdatePasswordRequest() http.Handler {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
-			value, ok := decodeAndValidate[updatePasswordRequest](w, r)
+			value, ok := decodeAndProcessValidationErrors[updatePasswordRequest](w, r)
 			if !ok {
 				return
 			}
-			trc, err := AddUpdatePasswordTask(r.Context(), value.AccessToken, value.CurrentPassword, value.NewPassword)
+			trc, err := AddUpdatePasswordTask(r.Context(), value.CurrentPassword, value.NewPassword)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -390,12 +526,7 @@ func createGetMFAStatus() http.Handler {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
-			value, ok := decodeAndValidate[getMFAStatusRequest](w, r)
-			if !ok {
-				return
-			}
-
-			trc, err := AddGetMFAStatusTask(r.Context(), value.AccessToken)
+			trc, err := AddGetMFAStatusTask(r.Context())
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -413,11 +544,11 @@ func createUpdateMFA() http.Handler {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
-			value, ok := decodeAndValidate[updateMFARequest](w, r)
+			value, ok := decodeAndProcessValidationErrors[updateMFARequest](w, r)
 			if !ok {
 				return
 			}
-			trc, err := AddUpdateMFASoftwareTokenTask(r.Context(), newSessionKey(), value.AccessToken, value.MFAType)
+			trc, err := AddUpdateMFASoftwareTokenTask(r.Context(), newSessionKey(), value.MFAType)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -435,11 +566,11 @@ func createVerifyUpdateMFA() http.Handler {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
-			value, ok := decodeAndValidate[verifyMFAUpdateRequest](w, r)
+			value, ok := decodeAndProcessValidationErrors[verifyMFAUpdateRequest](w, r)
 			if !ok {
 				return
 			}
-			trc, err := AddVerifyMFAUpdateTask(r.Context(), value.Session, value.AccessToken, value.Code)
+			trc, err := AddVerifyMFAUpdateTask(r.Context(), value.Session, value.Code)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -457,7 +588,7 @@ func createSelectMFA() http.Handler {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
-			value, ok := decodeAndValidate[selectMFARequest](w, r)
+			value, ok := decodeAndProcessValidationErrors[selectMFARequest](w, r)
 			if !ok {
 				return
 			}
@@ -481,7 +612,7 @@ func createInitiatePasswordResetRequest() http.Handler {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
-			value, ok := decodeAndValidate[initiatePasswordResetRequest](w, r)
+			value, ok := decodeAndProcessValidationErrors[initiatePasswordResetRequest](w, r)
 			if !ok {
 				return
 			}
@@ -542,7 +673,7 @@ func createFinalizePasswordResetRequest() http.Handler {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
-			value, ok := decodeAndValidate[finalizePasswordResetRequest](w, r)
+			value, ok := decodeAndProcessValidationErrors[finalizePasswordResetRequest](w, r)
 			if !ok {
 				return
 			}
@@ -556,6 +687,98 @@ func createFinalizePasswordResetRequest() http.Handler {
 			}
 
 			trc, err := AddFinalizePasswordResetTask(r.Context(), value.User, value.Code, value.Password)
+
+			if !processError(w, err, r.Context()) {
+				return
+			}
+
+			taskResult := <-trc
+
+			processTaskResponse(w, taskResult, r.Context())
+		})
+}
+
+func createUnmaskToken(getParams func(r *http.Request) (string, types.GenericError)) http.Handler {
+	tokenLimiter := ratelimiter.NewLimiter("unmaskToken", 100, time.Second)
+
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			r, cancel := attachDeadline(r)
+			defer cancel()
+
+			r = attachLoggerContextToRequest(r)
+
+			token, err := getParams(r)
+
+			if !processError(w, err, r.Context()) {
+				return
+			}
+
+			if allowed, err := processLimiter(tokenLimiter, token, w, r.Context()); err != nil {
+				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
+					return
+				}
+			} else if !allowed {
+				return
+			}
+
+			trc, err := AddUnmaskTokenTask(r.Context(), token)
+
+			if !processError(w, err, r.Context()) {
+				return
+			}
+
+			processTaskResponse(w, <-trc, r.Context())
+		})
+}
+
+func createUnmaskTokenGet() http.Handler {
+	return createUnmaskToken(func(r *http.Request) (string, types.GenericError) {
+		c := httpTools.ReadFirstNamedCookie(r, config.GetMasqueradedCookieName())
+
+		if c == nil || c.Value == "" {
+			return "", types.UnauthorizedError
+		}
+
+		return c.Value, nil
+	})
+}
+
+func createUnmaskTokenPost() http.Handler {
+	return createUnmaskToken(func(r *http.Request) (string, types.GenericError) {
+		value, err := decodeAndValidate[unmaskTokenRequest](r)
+
+		if err != nil {
+			return "", types.NewBadRequestError(err.Error(), err.Error(), err)
+		}
+
+		return value.Token, nil
+	})
+}
+
+func createGetProfileRequest() http.Handler {
+	userLimiter := ratelimiter.NewLimiter("createProfileRequest", 100, time.Second)
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			r, cancel := attachDeadline(r)
+			defer cancel()
+
+			token := getAuthTokenFromContext(r.Context())
+
+			if token == "" {
+				processError(w, types.UnauthorizedError, r.Context())
+				return
+			}
+
+			if allowed, err := processLimiter(userLimiter, token, w, r.Context()); err != nil {
+				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
+					return
+				}
+			} else if !allowed {
+				return
+			}
+
+			trc, err := AddGetProfileTask(r.Context())
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -582,6 +805,65 @@ func withDefaultMiddleware(next http.Handler) http.Handler {
 	return withRequestLogger(withDefaultRequestSizeLimit(next))
 }
 
+func withAuthAndDefaultMiddleware(next http.Handler) http.Handler {
+	return withRequestLogger(withDefaultRequestSizeLimit(withAuthTokenContext(next)))
+}
+
+func withAuthTokenContext(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ctx = r.Context()
+		if config.UseCookies() {
+			if config.UseMasquerade() {
+				c := httpTools.ReadFirstNamedCookie(r, config.GetMasqueradedCookieName())
+				if c != nil && c.Value != "" {
+					ctx = context.WithValue(ctx, AuthContextVarName, MasqueradedAuth{Token: c.Value})
+				}
+			} else {
+				c := httpTools.ReadFirstNamedCookie(r, config.GetAccessTokenCookieName())
+				if c != nil && c.Value != "" {
+					ctx = context.WithValue(ctx, AuthContextVarName, TokenAuth{Token: c.Value})
+				}
+			}
+		} else {
+			auth := r.Header.Get("Authorization")
+			if strings.HasPrefix(auth, "Bearer ") {
+				ctx = context.WithValue(ctx, AuthContextVarName, TokenAuth{Token: strings.TrimPrefix(auth, "Bearer ")})
+			}
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func withIdTokenContext(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ctx = r.Context()
+		if config.UseCookies() {
+			if !config.UseMasquerade() {
+				c := httpTools.ReadFirstNamedCookie(r, config.GetIDTokenCookieName())
+				if c != nil && c.Value != "" {
+					ctx = context.WithValue(ctx, IdTokenContextVarName, c.Value)
+				}
+			}
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func withRefreshTokenContext(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ctx = r.Context()
+		if config.UseCookies() {
+			if !config.UseMasquerade() {
+				c := httpTools.ReadFirstNamedCookie(r, config.GetRefreshTokenCookieName())
+				if c != nil && c.Value != "" {
+					ctx = context.WithValue(ctx, RefreshTokenContextVarName, c.Value)
+				}
+			}
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 func AddRoutes(mux *http.ServeMux) *http.ServeMux {
 	mux.Handle("POST /v1/login", withDefaultMiddleware(createLogin()))
 	mux.Handle("POST /v1/login/password/update", withDefaultMiddleware(createSatisfyPasswordUpdateRequest()))
@@ -589,17 +871,29 @@ func AddRoutes(mux *http.ServeMux) *http.ServeMux {
 	mux.Handle("POST /v1/login/mfa/setup", withDefaultMiddleware(createMFASetup()))
 	mux.Handle("POST /v1/login/mfa/setup/verify", withDefaultMiddleware(createMFASetupVerifySoftwareToken()))
 	mux.Handle("POST /v1/login/mfa/verify", withDefaultMiddleware(createMFAVerify()))
-	mux.Handle("POST /v1/refresh", withDefaultMiddleware(createRefreshToken()))
-	mux.Handle("POST /v1/logout", withDefaultMiddleware(createLogOut()))
-	mux.Handle("POST /v1/password/update", withDefaultMiddleware(createUpdatePasswordRequest()))
-	mux.Handle("POST /v1/mfa/status", withDefaultMiddleware(createGetMFAStatus()))
-	mux.Handle("POST /v1/mfa/update", withDefaultMiddleware(createUpdateMFA()))
-	mux.Handle("POST /v1/mfa/update/verify", withDefaultMiddleware(createVerifyUpdateMFA()))
+	mux.Handle("POST /v1/logout", withAuthAndDefaultMiddleware(withRefreshTokenContext(createLogOut())))
+	mux.Handle("POST /v1/password/update", withAuthAndDefaultMiddleware(createUpdatePasswordRequest()))
+	mux.Handle("POST /v1/mfa/status", withAuthAndDefaultMiddleware(createGetMFAStatus()))
+	mux.Handle("POST /v1/mfa/update", withAuthAndDefaultMiddleware(createUpdateMFA()))
+	mux.Handle("POST /v1/mfa/update/verify", withAuthAndDefaultMiddleware(createVerifyUpdateMFA()))
 
 	if passwordreset.GetSettings().Enabled {
 		mux.Handle("GET /v1/password/reset", withDefaultMiddleware(createResetPasswordRequest()))
 		mux.Handle("POST /v1/password/reset/request", withDefaultMiddleware(createInitiatePasswordResetRequest()))
 		mux.Handle("POST /v1/password/reset/finalize", withDefaultMiddleware(createFinalizePasswordResetRequest()))
+	}
+
+	if config.UseCookies() {
+		if config.UseMasquerade() {
+			mux.Handle("GET /v1/unmask", withAuthAndDefaultMiddleware(createUnmaskTokenGet()))
+		}
+		mux.Handle("GET /v1/profile", withAuthAndDefaultMiddleware(withIdTokenContext(createGetProfileRequest())))
+	} else {
+		if config.UseMasquerade() {
+			mux.Handle("POST /v1/unmask", withDefaultMiddleware(createUnmaskTokenPost()))
+		} else {
+			mux.Handle("POST /v1/refresh", withDefaultMiddleware(createRefreshToken()))
+		}
 	}
 
 	return mux

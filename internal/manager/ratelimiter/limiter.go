@@ -34,7 +34,7 @@ type Limiter interface {
 func NewLimiter(name string, limit int, window time.Duration) Limiter {
 	switch limiterStorageType {
 	case MEMORY:
-		rps := rate.Every(time.Duration(limit) * window)
+		rps := rate.Every(window / time.Duration(limit))
 		return NewTokenBucketLimiter(name, rps, 1)
 	case REDIS:
 		return NewRedisRateLimiter(name, limit, window)

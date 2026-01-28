@@ -49,8 +49,10 @@ var printConfigCmd = &cobra.Command{
 		sortedKeys = append(sortedKeys, viper.AllKeys()...)
 		sortedKeys.Sort()
 
+		rps := strings.NewReplacer(".", "_", "-", "_")
+
 		for _, key := range sortedKeys {
-			fmt.Printf("%s: %s\n", key, viper.GetString(key))
+			fmt.Printf("%s [%s]: %s\n", key, strings.ToUpper(rps.Replace(key)), viper.GetString(key))
 		}
 
 		return nil
@@ -89,6 +91,7 @@ func init() {
 	viper.AutomaticEnv()
 
 	rootCmd.AddCommand(serveCmd)
+
 	rootCmd.AddCommand(printConfigCmd)
 }
 

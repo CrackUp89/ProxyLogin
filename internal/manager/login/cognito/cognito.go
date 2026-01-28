@@ -33,6 +33,12 @@ var (
 	stopWorkers              func()
 )
 
+const (
+	AuthContextVarName         = "cognito_auth"
+	IdTokenContextVarName      = "cognito_id"
+	RefreshTokenContextVarName = "refresh_id"
+)
+
 var cognitoLogger *zap.Logger
 
 func getLogger() *zap.Logger {
@@ -71,7 +77,6 @@ func loadSettings() error {
 	}
 
 	loadProcessingSettings()
-	loadSessionSettings()
 
 	return nil
 }

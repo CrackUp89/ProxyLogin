@@ -10,10 +10,11 @@ import (
 	"proxylogin/internal/manager/config"
 	"proxylogin/internal/manager/logging"
 	"proxylogin/internal/manager/login/cognito"
+	"proxylogin/internal/manager/login/masquerade"
 	"proxylogin/internal/manager/login/passwordreset"
+	"proxylogin/internal/manager/ratelimiter"
 	"proxylogin/internal/manager/rds"
 	httpTools "proxylogin/internal/manager/tools/http"
-	"proxylogin/internal/manager/tools/ratelimiter"
 	"syscall"
 	"time"
 
@@ -39,6 +40,7 @@ func init() {
 	viper.SetDefault("http.cors.allowedOrigin", "*")
 	viper.SetDefault("http.cors.allowedMethods", "GET, POST, PUT, DELETE, OPTIONS")
 	viper.SetDefault("http.cors.allowedHeaders", "Content-Type, Device-Key, Location")
+	viper.SetDefault("http.cors.allowCredentials", true)
 }
 
 func Run() error {
@@ -49,6 +51,7 @@ func Run() error {
 	config.LoadConfig()
 	rds.LoadConfig()
 	ratelimiter.LoadConfig()
+	masquerade.LoadConfig()
 
 	var err error
 	passwordreset.LoadConfig()
@@ -129,11 +132,13 @@ func withCORSMiddleware(next http.Handler) http.Handler {
 	allowedOrigin := viper.GetString("http.cors.allowedOrigin")
 	allowedMethods := viper.GetString("http.cors.allowedMethods")
 	allowedHeaders := viper.GetString("http.cors.allowedHeaders")
+	allowCredentials := viper.GetString("http.cors.allowCredentials")
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
 		w.Header().Set("Access-Control-Allow-Methods", allowedMethods)
 		w.Header().Set("Access-Control-Allow-Headers", allowedHeaders)
+		w.Header().Set("Access-Control-Allow-Credentials", allowCredentials)
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return

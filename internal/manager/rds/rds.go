@@ -2,6 +2,7 @@ package rds
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/viper"
@@ -26,10 +27,12 @@ func LoadConfig() {
 	defaultKeyPrefix = viper.GetString("redis.keyprefix")
 }
 
+var clientOnce = &sync.Once{}
+
 func GetClient() *redis.Client {
-	if client == nil {
+	clientOnce.Do(func() {
 		client = redis.NewClient(redisOptions)
-	}
+	})
 	return client
 }
 
