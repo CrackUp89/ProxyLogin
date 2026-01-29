@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"proxylogin/internal/manager/config"
 	"proxylogin/internal/manager/rds"
 	"proxylogin/internal/manager/tools"
 	"reflect"
@@ -33,6 +34,20 @@ type SessionStorage interface {
 }
 
 var sessionStorage SessionStorage
+
+func createSessionsStorage() {
+	switch config.GetStorageType() {
+	case config.MemoryStorageType:
+		sessionStorage = NewLocalSessionStore()
+		startLocalStorageCleanupRoutine()
+		break
+	case config.RedisStorageType:
+		sessionStorage = NewRedisSessionStore()
+		break
+	default:
+		panic("invalid storage type")
+	}
+}
 
 type withValidityTimeframe interface {
 	GetStartTime() time.Time

@@ -78,6 +78,8 @@ func loadSettings() error {
 
 	loadProcessingSettings()
 
+	createSessionsStorage()
+
 	return nil
 }
 
