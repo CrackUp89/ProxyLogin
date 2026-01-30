@@ -2,6 +2,7 @@ package cognito
 
 import (
 	"proxylogin/internal/manager/login/types"
+	"time"
 )
 
 type TaskResultFlag int
@@ -94,7 +95,8 @@ const (
 
 type loginResponse struct {
 	LoginType loginResponseLoginType `json:"login_type"`
-	LoginData interface{}            `json:"login_data"`
+	LoginData interface{}            `json:"login_data,omitempty"`
+	Expires   time.Time              `json:"expires,omitempty"`
 }
 
 type mfaSetupRequest struct {
@@ -158,17 +160,15 @@ func (r mfaSoftwareTokenVerifyRequest) Validate() types.ValidationIssues {
 }
 
 type refreshTokenRequest struct {
-	User  string `json:"user"`
-	Token string `json:"token"`
+	User     string `json:"user"`
+	Token    string `json:"token"`
+	Remember bool   `json:"remember"`
 }
 
 func (r refreshTokenRequest) Validate() types.ValidationIssues {
 	errs := make(map[string]string)
 	if len(r.User) == 0 {
 		errs["user"] = "User is required"
-	}
-	if len(r.Token) == 0 {
-		errs["token"] = "Token is required"
 	}
 	return errs
 }

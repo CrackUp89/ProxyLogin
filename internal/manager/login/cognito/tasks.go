@@ -109,17 +109,18 @@ func AddMFAVerifyTask(ctx context.Context, sessionKey string, user string, code 
 type refreshTokenTask struct {
 	User         string
 	RefreshToken string
+	Remember     bool
 	Task
 }
 
 var refreshTokenTasks, refreshTokenTasksValidate = createTaskChan[refreshTokenTask]()
 
-func AddRefreshTokenTask(ctx context.Context, user string, refreshToken string) (TaskResultChan, types.GenericError) {
+func AddRefreshTokenTask(ctx context.Context, user string, refreshToken string, remember bool) (TaskResultChan, types.GenericError) {
 	if err := refreshTokenTasksValidate(); err != nil {
 		return nil, err
 	}
 	resultChan := make(TaskResultChan)
-	refreshTokenTasks <- refreshTokenTask{user, refreshToken, Task{ctx, resultChan}}
+	refreshTokenTasks <- refreshTokenTask{user, refreshToken, remember, Task{ctx, resultChan}}
 	return resultChan, nil
 }
 

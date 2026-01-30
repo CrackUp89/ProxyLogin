@@ -775,7 +775,22 @@ func processRefreshTokenTask(task refreshTokenTask) {
 
 	requestLogger.Log(processingLogLevel, "processing", zap.String("username", task.User))
 
-	authResult, err := refreshToken(task.Context, task.RefreshToken, task.User)
+	var token string
+	if task.RefreshToken == "" {
+		token = getRefreshTokenFromContext(task.Context)
+	} else {
+		token = task.RefreshToken
+	}
+
+	if token == "" {
+		task.ResultChan <- TaskResult{
+			Err:   loginTypes.NewGenericAuthenticationError("no refresh token provided", "no refresh token provided", nil),
+			Flags: LogoutTaskResultFlag,
+		}
+		return
+	}
+
+	authResult, err := refreshToken(task.Context, token, task.User)
 
 	if err != nil {
 		task.ResultChan <- TaskResult{
@@ -785,7 +800,7 @@ func processRefreshTokenTask(task refreshTokenTask) {
 	}
 
 	if authResult != nil {
-		handleAuthResults(task.Task, authResult, task.User, false) //todo: remember only if using cookies and cookies have max age
+		handleAuthResults(task.Task, authResult, task.User, task.Remember)
 		return
 	}
 
@@ -1566,15 +1581,14 @@ func processGetProfileTask(task getProfileTask) {
 
 	var idToken string
 
-	msq := getMasqueradedTokenFromContext(task.Context)
-	if msq == "" {
+	if msq := getMasqueradedTokenFromContext(task.Context); msq == "" {
 		_, ok := checkAuthContextValue(task.Task)
 		if !ok {
 			return
 		}
 		idToken = getIdTokenFromContext(task.Context)
 	} else {
-		r, err := unmaskToken(task.Context, getMasqueradedTokenFromContext(task.Context), requestLogger, true)
+		r, err := unmaskToken(task.Context, msq, requestLogger, true)
 
 		if err != nil {
 			task.ResultChan <- TaskResult{

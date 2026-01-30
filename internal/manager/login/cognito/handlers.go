@@ -275,12 +275,29 @@ func processAuthResponse(ctx context.Context, w http.ResponseWriter, taskResult 
 					accessExpires = time.Time{}
 					idExpires = time.Time{}
 				}
+
+				var expires time.Time
+
 				http.SetCookie(w, createCookie(config.GetAccessTokenCookieName(), p.AccessToken, accessExpires))
 				http.SetCookie(w, createCookie(config.GetIDTokenCookieName(), p.IdToken, idExpires))
 
-				logTransportError(httpTools.WriteJSON(w, loginResponse{
+				resp := &loginResponse{
 					LoginType: CookiesLoginResponseLoginType,
-				}), ctx)
+				}
+
+				if !p.AccessTokenExpires.IsZero() {
+					resp.Expires = p.AccessTokenExpires
+				}
+
+				if !p.IdTokenExpires.IsZero() && p.IdTokenExpires.Before(expires) {
+					expires = p.IdTokenExpires
+				}
+
+				if !expires.IsZero() {
+					resp.Expires = expires
+				}
+
+				logTransportError(httpTools.WriteJSON(w, resp), ctx)
 			} else {
 				logTransportError(httpTools.WriteJSON(w, loginResponse{
 					LoginType: TokenSetLoginResponseLoginType,
@@ -419,7 +436,7 @@ func createMFAVerify() http.Handler {
 		})
 }
 
-func createRefreshToken() http.Handler { //todo: rework for msq
+func createRefreshToken() http.Handler {
 	userLimiter := ratelimiter.NewLimiter("createRefreshTokenUser", 5, time.Second)
 
 	return http.HandlerFunc(
@@ -442,7 +459,7 @@ func createRefreshToken() http.Handler { //todo: rework for msq
 				return
 			}
 
-			trc, err := AddRefreshTokenTask(r.Context(), value.User, value.Token)
+			trc, err := AddRefreshTokenTask(r.Context(), value.User, value.Token, value.Remember)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -757,7 +774,7 @@ func createUnmaskTokenPost() http.Handler {
 }
 
 func createGetProfileRequest() http.Handler {
-	userLimiter := ratelimiter.NewLimiter("createProfileRequest", 100, time.Second)
+	userLimiter := ratelimiter.NewLimiter("createProfileRequest", 6000, time.Minute)
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			r, cancel := attachDeadline(r)
@@ -883,6 +900,10 @@ func AddRoutes(mux *http.ServeMux) *http.ServeMux {
 		mux.Handle("POST /v1/password/reset/finalize", withDefaultMiddleware(createFinalizePasswordResetRequest()))
 	}
 
+	if !config.UseMasquerade() {
+		mux.Handle("POST /v1/refresh", withDefaultMiddleware(withRefreshTokenContext(createRefreshToken())))
+	}
+
 	if config.UseCookies() {
 		if config.UseMasquerade() {
 			mux.Handle("GET /v1/unmask", withAuthAndDefaultMiddleware(createUnmaskTokenGet()))
@@ -891,8 +912,6 @@ func AddRoutes(mux *http.ServeMux) *http.ServeMux {
 	} else {
 		if config.UseMasquerade() {
 			mux.Handle("POST /v1/unmask", withDefaultMiddleware(createUnmaskTokenPost()))
-		} else {
-			mux.Handle("POST /v1/refresh", withDefaultMiddleware(createRefreshToken()))
 		}
 	}
 
