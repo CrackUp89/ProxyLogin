@@ -286,7 +286,7 @@ func processAuthResponse(ctx context.Context, w http.ResponseWriter, taskResult 
 				}
 
 				if !p.AccessTokenExpires.IsZero() {
-					resp.Expires = p.AccessTokenExpires
+					resp.Expires = &p.AccessTokenExpires
 				}
 
 				if !p.IdTokenExpires.IsZero() && p.IdTokenExpires.Before(expires) {
@@ -294,7 +294,7 @@ func processAuthResponse(ctx context.Context, w http.ResponseWriter, taskResult 
 				}
 
 				if !expires.IsZero() {
-					resp.Expires = expires
+					resp.Expires = &expires
 				}
 
 				logTransportError(httpTools.WriteJSON(w, resp), ctx)

@@ -940,7 +940,7 @@ func processLogOutTask(task logOutTask) {
 			} else if rt := getRefreshTokenFromContext(task.Context); rt != "" {
 				token = rt
 			} else {
-				requestLogger.Warn("no token provide in body and no token to unmask")
+				requestLogger.Warn("no token provided in body and no token to unmask")
 				return
 			}
 

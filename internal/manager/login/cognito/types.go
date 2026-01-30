@@ -96,7 +96,7 @@ const (
 type loginResponse struct {
 	LoginType loginResponseLoginType `json:"login_type"`
 	LoginData interface{}            `json:"login_data,omitempty"`
-	Expires   time.Time              `json:"expires,omitempty"`
+	Expires   *time.Time             `json:"expires,omitempty"`
 }
 
 type mfaSetupRequest struct {
