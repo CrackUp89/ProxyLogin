@@ -765,7 +765,6 @@ func refreshToken(ctx context.Context, token string, user string) (*cognitoTypes
 	}
 }
 
-// todo: rework for cookies
 func processRefreshTokenTask(task refreshTokenTask) {
 	if !checkTaskContext(task.Task) {
 		return
@@ -790,7 +789,44 @@ func processRefreshTokenTask(task refreshTokenTask) {
 		return
 	}
 
-	authResult, err := refreshToken(task.Context, token, task.User)
+	var user string
+	if task.User == "" {
+		idToken := getIdTokenFromContext(task.Context)
+		if idToken == "" {
+			user = ""
+		} else {
+			t, err := jwksValidator.ValidateToken(idToken)
+			if err != nil {
+				task.ResultChan <- TaskResult{
+					Err:   loginTypes.NewGenericAuthenticationError("invalid id token", "invalid id token", nil),
+					Flags: LogoutTaskResultFlag,
+				}
+				return
+			}
+			if claims, ok := t.Claims.(jwt.MapClaims); t.Valid && ok {
+				if un, ok := claims["username"].(string); ok {
+					user = un
+				}
+			} else {
+				task.ResultChan <- TaskResult{
+					Err: loginTypes.NewGenericAuthenticationError("token is invalid or does not contain username", "invalid token", nil),
+				}
+				return
+			}
+		}
+	} else {
+		user = task.User
+	}
+
+	if user == "" {
+		task.ResultChan <- TaskResult{
+			Err:   loginTypes.NewGenericAuthenticationError("no user provided", "no user provided", nil),
+			Flags: LogoutTaskResultFlag,
+		}
+		return
+	}
+
+	authResult, err := refreshToken(task.Context, token, user)
 
 	if err != nil {
 		task.ResultChan <- TaskResult{

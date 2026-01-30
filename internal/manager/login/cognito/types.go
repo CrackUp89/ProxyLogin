@@ -166,11 +166,7 @@ type refreshTokenRequest struct {
 }
 
 func (r refreshTokenRequest) Validate() types.ValidationIssues {
-	errs := make(map[string]string)
-	if len(r.User) == 0 {
-		errs["user"] = "User is required"
-	}
-	return errs
+	return make(map[string]string)
 }
 
 type logOutRequest struct {

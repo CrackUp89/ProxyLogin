@@ -437,7 +437,7 @@ func createMFAVerify() http.Handler {
 }
 
 func createRefreshToken() http.Handler {
-	userLimiter := ratelimiter.NewLimiter("createRefreshTokenUser", 5, time.Second)
+	tokenLimiter := ratelimiter.NewLimiter("createRefreshToken", 5, time.Second)
 
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -451,7 +451,7 @@ func createRefreshToken() http.Handler {
 				return
 			}
 
-			if allowed, err := processLimiter(userLimiter, value.User, w, r.Context()); err != nil {
+			if allowed, err := processLimiter(tokenLimiter, value.Token, w, r.Context()); err != nil {
 				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
 					return
 				}
@@ -881,6 +881,17 @@ func withRefreshTokenContext(next http.Handler) http.Handler {
 	})
 }
 
+func appendMiddleware(handler http.Handler, middleware ...func(next http.Handler) http.Handler) http.Handler {
+	if len(middleware) == 0 {
+		return handler
+	}
+
+	for i := 0; i < len(middleware); i++ {
+		handler = middleware[i](handler)
+	}
+	return handler
+}
+
 func AddRoutes(mux *http.ServeMux) *http.ServeMux {
 	mux.Handle("POST /v1/login", withDefaultMiddleware(createLogin()))
 	mux.Handle("POST /v1/login/password/update", withDefaultMiddleware(createSatisfyPasswordUpdateRequest()))
@@ -901,7 +912,7 @@ func AddRoutes(mux *http.ServeMux) *http.ServeMux {
 	}
 
 	if !config.UseMasquerade() {
-		mux.Handle("POST /v1/refresh", withDefaultMiddleware(withRefreshTokenContext(createRefreshToken())))
+		mux.Handle("POST /v1/refresh", appendMiddleware(createRefreshToken(), withRefreshTokenContext, withIdTokenContext, withDefaultMiddleware))
 	}
 
 	if config.UseCookies() {
