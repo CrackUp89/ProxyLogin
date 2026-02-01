@@ -23,56 +23,11 @@ func startWorker() chan bool {
 	go func() {
 		for {
 			select {
-			case t := <-loginTasks:
-				processLoginTask(t)
-				break
-			case t := <-mfaSetupTasks:
-				processMFASetupTask(t)
-				break
-			case t := <-mfaSetupSoftwareTokenVerifyTasks:
-				processMFASetupVerifySoftwareTokenTask(t)
-				break
-			case t := <-mfaVerifyTasks:
-				processMFAVerifyTask(t)
-				break
-			case t := <-refreshTokenTasks:
-				processRefreshTokenTask(t)
-				break
-			case t := <-logOutTasks:
-				processLogOutTask(t)
-				break
-			case t := <-satisfyPasswordUpdateRequestTasks:
-				processSatisfyPasswordUpdateRequestTask(t)
-				break
-			case t := <-updatePasswordTasks:
-				processUpdatePasswordTask(t)
-				break
-			case t := <-getMFAStatusTasks:
-				processGetMFAStatusTask(t)
-				break
-			case t := <-updateMFASoftwareTokenTasks:
-				processUpdateMFATask(t)
-				break
-			case t := <-verifyMFAUpdateTasks:
-				processVerifyUpdateMFATask(t)
-				break
-			case t := <-selectMFATasks:
-				processSelectMFATask(t)
-				break
-			case t := <-initiatePasswordResetTasks:
-				processInitiatePasswordResetTask(t)
-				break
-			case t := <-resetPasswordTasks:
-				processResetPasswordTask(t)
-				break
-			case t := <-finalizePasswordResetTasks:
-				processFinalizePasswordResetTask(t)
-				break
-			case t := <-unmaskTokenTasks:
-				processUnmaskTokenTask(t)
-				break
-			case t := <-getProfileTasks:
-				processGetProfileTask(t)
+			case t := <-tasks:
+				t.task.Process()
+				if t.done != nil {
+					t.done()
+				}
 				break
 			case <-stopChannel:
 				return

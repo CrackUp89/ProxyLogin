@@ -339,7 +339,7 @@ func createLogin() http.Handler {
 				return
 			}
 
-			trc, err := AddLoginTask(r.Context(), newSessionKey(), value.User, value.Password, value.Remember)
+			trc, err := createLoginTask(r.Context(), newSessionKey(), value.User, value.Password, value.Remember)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -360,7 +360,7 @@ func createMFASetup() http.Handler {
 				return
 			}
 
-			trc, err := AddMFASetupTask(r.Context(), value.Session, value.User, types.MFAType(value.MFAType))
+			trc, err := createMFASetupTask(r.Context(), value.Session, value.User, types.MFAType(value.MFAType))
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -391,7 +391,7 @@ func createMFASetupVerifySoftwareToken() http.Handler {
 				return
 			}
 
-			trc, err := AddMFASetupVerifySoftwareTokenTask(r.Context(), value.Session, value.User, value.Code)
+			trc, err := createMFASetupVerifySoftwareTokenTask(r.Context(), value.Session, value.User, value.Code)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -424,7 +424,7 @@ func createMFAVerify() http.Handler {
 				return
 			}
 
-			trc, err := AddMFAVerifyTask(r.Context(), value.Session, value.User, value.Code)
+			trc, err := createMFAVerifyTask(r.Context(), value.Session, value.User, value.Code)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -459,7 +459,7 @@ func createRefreshToken() http.Handler {
 				return
 			}
 
-			trc, err := AddRefreshTokenTask(r.Context(), value.User, value.Token, value.Remember)
+			trc, err := createRefreshTokenTask(r.Context(), value.User, value.Token, value.Remember)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -482,7 +482,7 @@ func createLogOut() http.Handler {
 				}
 			}
 
-			trc, err := AddLogOutTask(r.Context(), token)
+			trc, err := createLogOutTask(r.Context(), token)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -503,7 +503,7 @@ func createSatisfyPasswordUpdateRequest() http.Handler {
 				return
 			}
 
-			trc, err := AddSatisfyPasswordUpdateRequestTask(r.Context(), value.Session, value.User, value.Password, value.Attributes)
+			trc, err := createSatisfyPasswordUpdateRequestTask(r.Context(), value.Session, value.User, value.Password, value.Attributes)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -525,7 +525,7 @@ func createUpdatePasswordRequest() http.Handler {
 			if !ok {
 				return
 			}
-			trc, err := AddUpdatePasswordTask(r.Context(), value.CurrentPassword, value.NewPassword)
+			trc, err := createUpdatePasswordTask(r.Context(), value.CurrentPassword, value.NewPassword)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -543,7 +543,7 @@ func createGetMFAStatus() http.Handler {
 			r, cancel := attachDeadline(r)
 			defer cancel()
 
-			trc, err := AddGetMFAStatusTask(r.Context())
+			trc, err := createGetMFAStatusTask(r.Context())
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -565,7 +565,7 @@ func createUpdateMFA() http.Handler {
 			if !ok {
 				return
 			}
-			trc, err := AddUpdateMFASoftwareTokenTask(r.Context(), newSessionKey(), value.MFAType)
+			trc, err := createUpdateMFASoftwareTokenTask(r.Context(), newSessionKey(), value.MFAType)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -587,7 +587,7 @@ func createVerifyUpdateMFA() http.Handler {
 			if !ok {
 				return
 			}
-			trc, err := AddVerifyMFAUpdateTask(r.Context(), value.Session, value.Code)
+			trc, err := createVerifyMFAUpdateTask(r.Context(), value.Session, value.Code)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -609,7 +609,7 @@ func createSelectMFA() http.Handler {
 			if !ok {
 				return
 			}
-			trc, err := AddSelectMFATask(r.Context(), value.Session, value.User, value.MFAType)
+			trc, err := createSelectMFATask(r.Context(), value.Session, value.User, value.MFAType)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -642,7 +642,7 @@ func createInitiatePasswordResetRequest() http.Handler {
 				return
 			}
 
-			trc, err := AddInitiatePasswordResetTask(r.Context(), value.Email)
+			trc, err := createInitiatePasswordResetTask(r.Context(), value.Email)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -667,7 +667,7 @@ func createResetPasswordRequest() http.Handler {
 				return
 			}
 
-			trc, err := AddResetPasswordTask(r.Context(), string(token))
+			trc, err := createResetPasswordTask(r.Context(), string(token))
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -703,7 +703,7 @@ func createFinalizePasswordResetRequest() http.Handler {
 				return
 			}
 
-			trc, err := AddFinalizePasswordResetTask(r.Context(), value.User, value.Code, value.Password)
+			trc, err := createFinalizePasswordResetTask(r.Context(), value.User, value.Code, value.Password)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -739,7 +739,7 @@ func createUnmaskToken(getParams func(r *http.Request) (string, types.GenericErr
 				return
 			}
 
-			trc, err := AddUnmaskTokenTask(r.Context(), token)
+			trc, err := createUnmaskTokenTask(r.Context(), token)
 
 			if !processError(w, err, r.Context()) {
 				return
@@ -795,7 +795,7 @@ func createGetProfileRequest() http.Handler {
 				return
 			}
 
-			trc, err := AddGetProfileTask(r.Context())
+			trc, err := createGetProfileTask(r.Context())
 
 			if !processError(w, err, r.Context()) {
 				return

@@ -61,7 +61,7 @@ func resolveAuthTokenFromContext(ctx context.Context) (string, loginTypes.Generi
 
 	if t, ok := auth.(MasqueradedAuth); ok {
 		requestLogger := getRequestLoggerFromContext(ctx)
-		token, err := unmaskToken(ctx, t.Token, requestLogger, true)
+		token, err := unmaskToken(ctx, t.Token, requestLogger, true, masquerade.UnmaskRefreshToken())
 		if err != nil {
 			return "", err
 		}
@@ -926,18 +926,19 @@ func processLogOutTask(task logOutTask) {
 
 	//always report success
 	go func() {
+		ctx := context.WithoutCancel(context.Background())
 		token := task.RefreshToken
 
 		if token == "" {
 			if msq := getMasqueradedTokenFromContext(task.Context); msq != "" {
-				r, err := unmaskToken(task.Context, msq, requestLogger, false)
+				r, err := unmaskToken(ctx, msq, requestLogger, false, true)
 				if err != nil {
 					requestLogger.Warn("failed to unmask token to rewoke", zap.Error(err))
 					return
 				}
 				dropMasqueradedToken(msq, requestLogger)
 				token = r.RefreshToken
-			} else if rt := getRefreshTokenFromContext(task.Context); rt != "" {
+			} else if rt := getRefreshTokenFromContext(ctx); rt != "" {
 				token = rt
 			} else {
 				requestLogger.Warn("no token provided in body and no token to unmask")
@@ -955,7 +956,7 @@ func processLogOutTask(task logOutTask) {
 			input.ClientSecret = aws.String(cognitoClientSecret)
 		}
 
-		_, err := cognitoClient.RevokeToken(context.Background(), input)
+		_, err := cognitoClient.RevokeToken(ctx, input)
 
 		if err != nil {
 			requestLogger.Warn("failed to revoke token", zap.Error(err))
@@ -1095,7 +1096,7 @@ func processGetMFAStatusTask(task getMFAStatusTask) {
 	}
 }
 
-func updateSoftwareToken(task updateMFASoftwareTokenTask) {
+func processUpdateMFASoftwareTokenTask(task updateMFASoftwareTokenTask) {
 	accessToken, ok := checkAuthContextValue(task.Task)
 	if !ok {
 		return
@@ -1139,7 +1140,7 @@ func processUpdateMFATask(task updateMFASoftwareTokenTask) {
 
 	switch task.MFAType {
 	case loginTypes.MFATypeSoftwareToken:
-		updateSoftwareToken(task)
+		processUpdateMFASoftwareTokenTask(task)
 		return
 	default:
 		task.ResultChan <- TaskResult{
@@ -1150,7 +1151,7 @@ func processUpdateMFATask(task updateMFASoftwareTokenTask) {
 
 }
 
-func verifyMFASetupSoftwareToken(task verifyMFAUpdateTask) {
+func processVerifyMFAUpdateTask(task verifyMFAUpdateTask) {
 	accessToken, ok := checkAuthContextValue(task.Task)
 	if !ok {
 		return
@@ -1225,7 +1226,7 @@ func processVerifyUpdateMFATask(task verifyMFAUpdateTask) {
 
 	switch session.NextStep {
 	case NextStepMFASoftwareTokenSetupVerify:
-		verifyMFASetupSoftwareToken(task)
+		processVerifyMFAUpdateTask(task)
 	default:
 		task.ResultChan <- TaskResult{
 			Err: loginTypes.NewBadRequestError("MFA method not supported", "MFA method not supported", nil),
@@ -1513,7 +1514,7 @@ func dropMasqueradedToken(token string, requestLogger *zap.Logger) {
 	}
 }
 
-func unmaskToken(ctx context.Context, token string, requestLogger *zap.Logger, refresh bool) (*loginTypes.AuthTokenSet, loginTypes.GenericError) {
+func unmaskToken(ctx context.Context, token string, requestLogger *zap.Logger, refreshExpired bool, appendRefreshToken bool) (*loginTypes.AuthTokenSet, loginTypes.GenericError) {
 	if token == "" {
 		return nil, loginTypes.UnauthorizedError
 	}
@@ -1527,48 +1528,50 @@ func unmaskToken(ctx context.Context, token string, requestLogger *zap.Logger, r
 		return nil, loginTypes.InvalidTokenMaskError
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
-	refreshRequired := false
+	if refreshExpired {
+		deadline := time.Now().Add(10 * time.Second)
+		refreshRequired := false
 
-	if !d.Tokens[loginTypes.AuthTokenType].Expires.After(deadline) {
-		refreshRequired = true
-	}
+		if !d.Tokens[loginTypes.AuthTokenType].Expires.After(deadline) {
+			refreshRequired = true
+		}
 
-	if !d.Tokens[loginTypes.IDTokenType].Expires.After(deadline) {
-		refreshRequired = true
-	}
+		if !d.Tokens[loginTypes.IDTokenType].Expires.After(deadline) {
+			refreshRequired = true
+		}
 
-	if refresh && refreshRequired {
-		requestLogger.Log(processingLogLevel, "refresh required")
-		if rt, ok := d.Tokens[loginTypes.RefreshTokenType]; ok {
-			var ttl time.Duration
-			if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
-				ttl = deadline.Sub(time.Now())
+		if refreshRequired {
+			requestLogger.Log(processingLogLevel, "refresh required")
+			if rt, ok := d.Tokens[loginTypes.RefreshTokenType]; ok {
+				var ttl time.Duration
+				if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
+					ttl = deadline.Sub(time.Now())
+				} else {
+					ttl = 60 * time.Second
+				}
+
+				ro := locking.GetReturnOnce[*cognitoTypes.AuthenticationResultType](token, ttl)
+				authResults, err := ro.Do(ctx, func(ctx context.Context) (*cognitoTypes.AuthenticationResultType, error) {
+					return refreshToken(ctx, rt.Value, d.User)
+				})
+
+				if err != nil {
+					return nil, loginTypes.NewGenericAuthenticationError(err.Error(), "authentication error", err)
+				}
+
+				r, err := authResultToAuthTokenSet(authResults)
+				if err != nil {
+					return nil, loginTypes.NewGenericAuthenticationError(err.Error(), "authentication error", err)
+				}
+
+				return r, nil
 			} else {
-				ttl = 60 * time.Second
+				return nil, loginTypes.NewGenericAuthenticationError("unable to refresh tokens - no refresh token", "unauthorized", nil)
 			}
-
-			ro := locking.GetReturnOnce[*cognitoTypes.AuthenticationResultType](token, ttl)
-			authResults, err := ro.Do(ctx, func(ctx context.Context) (*cognitoTypes.AuthenticationResultType, error) {
-				return refreshToken(ctx, rt.Value, d.User)
-			})
-
-			if err != nil {
-				return nil, loginTypes.NewGenericAuthenticationError(err.Error(), "authentication error", err)
-			}
-
-			r, err := authResultToAuthTokenSet(authResults)
-			if err != nil {
-				return nil, loginTypes.NewGenericAuthenticationError(err.Error(), "authentication error", err)
-			}
-
-			return r, nil
-		} else {
-			return nil, loginTypes.NewGenericAuthenticationError("unable to refresh tokens - no refresh token", "unauthorized", nil)
 		}
 	}
 
-	return tokenSetToAuthPayload(d.Tokens, masquerade.UnmaskRefreshToken()), nil
+	return tokenSetToAuthPayload(d.Tokens, appendRefreshToken), nil
 }
 
 func processUnmaskTokenTask(task unmaskTokenTask) {
@@ -1580,7 +1583,7 @@ func processUnmaskTokenTask(task unmaskTokenTask) {
 
 	requestLogger.Log(processingLogLevel, "processing")
 
-	r, err := unmaskToken(task.Context, task.Token, requestLogger, true)
+	r, err := unmaskToken(task.Context, task.Token, requestLogger, true, masquerade.UnmaskRefreshToken())
 	//todo: add option to remember unmasked token
 	handleAuthPayload(task.Task, r, false, err)
 }
@@ -1624,7 +1627,7 @@ func processGetProfileTask(task getProfileTask) {
 		}
 		idToken = getIdTokenFromContext(task.Context)
 	} else {
-		r, err := unmaskToken(task.Context, msq, requestLogger, true)
+		r, err := unmaskToken(task.Context, msq, requestLogger, true, masquerade.UnmaskRefreshToken())
 
 		if err != nil {
 			task.ResultChan <- TaskResult{
