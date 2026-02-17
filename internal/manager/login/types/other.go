@@ -21,9 +21,29 @@ func (t TooManyTasks) Code() int {
 }
 
 func (t TooManyTasks) Type() ErrorType {
-	return OverloadErrorType
+	return TooManyRequestsErrorType
 }
 
 func NewTooManyTasks(taskName string) TooManyTasks {
 	return TooManyTasks{taskName: taskName}
 }
+
+type tooManyRequests struct{}
+
+func (t tooManyRequests) Error() string {
+	return "too many requests"
+}
+
+func (t tooManyRequests) PrivateError() string {
+	return "too many requests"
+}
+
+func (t tooManyRequests) Code() int {
+	return 9001
+}
+
+func (t tooManyRequests) Type() ErrorType {
+	return TooManyRequestsErrorType
+}
+
+var TooManyRequests = tooManyRequests{}

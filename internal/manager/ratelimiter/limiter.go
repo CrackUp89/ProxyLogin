@@ -109,3 +109,104 @@ func (rrl *RedisRateLimiter) Allow(ctx context.Context, key string) (bool, error
 
 	return incr.Val() <= int64(rrl.limit), nil
 }
+
+type TotalLimiter interface {
+	Allow(ctx context.Context, key string) (bool, error)
+	Drop(ctx context.Context, key string) error
+}
+
+func NewTotalLimiter(name string, max int64) TotalLimiter {
+	switch limiterStorageType {
+	case MEMORY:
+		return NewTokenBucketTotalLimiter(name, max)
+	case REDIS:
+		return NewRedisTotalLimiter(name, max)
+	}
+	panic("invalid storage type")
+}
+
+type TokenBucketTotalLimiter struct {
+	name     string
+	mu       sync.Mutex
+	counters map[string]int64
+	max      int64
+}
+
+func NewTokenBucketTotalLimiter(name string, max int64) *TokenBucketTotalLimiter {
+	return &TokenBucketTotalLimiter{
+		name:     name,
+		counters: make(map[string]int64),
+		max:      max,
+	}
+}
+
+func (l *TokenBucketTotalLimiter) Allow(ctx context.Context, key string) (bool, error) {
+	if l.max < 1 {
+		return true, nil
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	total, exists := l.counters[key]
+	if !exists {
+		l.counters[key] = 1
+		return true, nil
+	}
+
+	if total >= l.max {
+		return false, nil
+	}
+
+	l.counters[key] += 1
+	return true, nil
+}
+
+func (l *TokenBucketTotalLimiter) Drop(ctx context.Context, key string) error {
+	delete(l.counters, key)
+	return nil
+}
+
+type RedisTotalLimiter struct {
+	name string
+	max  int64
+}
+
+func NewRedisTotalLimiter(name string, max int64) *RedisTotalLimiter {
+	return &RedisTotalLimiter{
+		name: name,
+		max:  max,
+	}
+}
+
+func (l *RedisTotalLimiter) Allow(ctx context.Context, key string) (bool, error) {
+	if l.max < 1 {
+		return true, nil
+	}
+
+	redisKey := rds.BuildKey("totallimit:", l.name, ":", key)
+
+	incr := rds.GetClient().Incr(ctx, redisKey)
+	if err := incr.Err(); err != nil {
+		return false, err
+	}
+
+	val := incr.Val()
+	return val < l.max, nil
+
+	//pipe := rds.GetClient().Pipeline()
+	//pipe.Expire(ctx, redisKey, time.Hour)
+	//incr := pipe.Incr(ctx, redisKey)
+	//
+	//_, err := pipe.Exec(ctx)
+	//if err != nil {
+	//	return false, err
+	//}
+	//
+	//return incr.Val() <= l.max, nil
+}
+
+func (l *RedisTotalLimiter) Drop(ctx context.Context, key string) error {
+	redisKey := rds.BuildKey("totallimit:", l.name, ":", key)
+	return rds.GetClient().Del(ctx, redisKey).Err()
+}

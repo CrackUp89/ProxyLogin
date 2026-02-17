@@ -28,6 +28,7 @@ func getSessionsLogger() *zap.Logger {
 type SessionStorage interface {
 	GetLoginSession(ctx context.Context, loginSession string) (*LoginSession, error)
 	CreateLoginSession(ctx context.Context, loginSessionKey string, cognitoSession string, nextStep NextStep, rememberUser bool, expires time.Time, tag interface{}) error
+	DropLoginSession(ctx context.Context, loginSessionKey string) error
 	GetResetPasswordSession(ctx context.Context, token string) (*InitiateResetPasswordSession, error)
 	CreateResetPasswordSession(ctx context.Context, resetPasswordSessionKey string, user string, email string, expires time.Time) error
 	DropResetPasswordSession(ctx context.Context, token string) error
@@ -91,13 +92,14 @@ var loginSessionMutexManager = tools.NamedMutexManager{}
 
 func lockLoginSession(sessionKey string) func() {
 	if sessionKey == "" {
+		getSessionsLogger().Warn("can not lock session - session key is empty", zap.Stack("stack"))
 		return func() {
-			getSessionsLogger().Warn("can not lock session - session key is empty", zap.Stack("stack"))
+			getSessionsLogger().Warn("can not unlock session - session key is empty", zap.Stack("stack"))
 		}
 	}
 	lock := loginSessionMutexManager.GetNamedMutex(sessionKey)
 	lock.Lock()
-	return func() { lock.Unlock() }
+	return lock.Unlock
 }
 
 type LoginSession struct {
@@ -165,6 +167,11 @@ func (l *LocalSessionStore) CreateLoginSession(_ context.Context, loginSessionKe
 			nextStep,
 			rememberUser,
 			tag})
+	return nil
+}
+
+func (l *LocalSessionStore) DropLoginSession(_ context.Context, loginSessionKey string) error {
+	l.activeLoginSessions.Delete(loginSessionKey)
 	return nil
 }
 
@@ -262,6 +269,11 @@ func (r *RedisSessionStore) CreateLoginSession(ctx context.Context, loginSession
 		zap.Duration("ttl", ttl))
 
 	return nil
+}
+
+func (r *RedisSessionStore) DropLoginSession(ctx context.Context, loginSessionKey string) error {
+	key := rds.BuildKey(loginSessionPrefix, loginSessionKey)
+	return rds.GetClient().Del(ctx, key).Err()
 }
 
 func (r *RedisSessionStore) GetResetPasswordSession(ctx context.Context, token string) (*InitiateResetPasswordSession, error) {

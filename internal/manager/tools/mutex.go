@@ -20,10 +20,6 @@ type NamedMutexManager struct {
 }
 
 func (r *NamedMutexManager) GetNamedMutex(name string) *sync.Mutex {
-	mutex, ok := r.mutexMap.Load(name)
-	if !ok {
-		newMutex := &sync.Mutex{}
-		mutex, _ = r.mutexMap.LoadOrStore(name, newMutex)
-	}
+	mutex, _ := r.mutexMap.LoadOrStore(name, &sync.Mutex{})
 	return mutex.(*sync.Mutex)
 }

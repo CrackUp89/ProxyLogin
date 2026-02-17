@@ -11,6 +11,7 @@ import (
 	httpTools "proxylogin/internal/manager/tools/http"
 	"proxylogin/internal/manager/tools/json"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -81,7 +82,11 @@ func getAuthTokenFromContext(ctx context.Context) string {
 	panic("unknown auth type")
 }
 
-func processError(w http.ResponseWriter, err types.GenericError, ctx context.Context) bool {
+type errorProcessingResult struct {
+	hadError bool
+}
+
+func processError(w http.ResponseWriter, err types.GenericError, ctx context.Context) errorProcessingResult {
 	if err != nil {
 		requestLogger := getRequestLogger(ctx)
 
@@ -94,8 +99,8 @@ func processError(w http.ResponseWriter, err types.GenericError, ctx context.Con
 			requestLogger.Warn("bad request", zap.Error(err), zap.String("privateError", err.PrivateError()))
 			logTransportError(httpTools.WriteBadRequest(w, err), ctx)
 			break
-		case types.OverloadErrorType:
-			requestLogger.Error("overloaded", zap.Error(err), zap.String("privateError", err.PrivateError()))
+		case types.TooManyRequestsErrorType:
+			requestLogger.Error("too many requests", zap.Error(err), zap.String("privateError", err.PrivateError()))
 			logTransportError(httpTools.WriteTooManyRequests(w), ctx)
 			break
 		case types.InternalErrorType:
@@ -107,24 +112,28 @@ func processError(w http.ResponseWriter, err types.GenericError, ctx context.Con
 			logTransportError(httpTools.WriteInternalServiceError(w, err), ctx)
 			break
 		}
-		return false
+		return errorProcessingResult{true}
 	}
 
-	return true
+	return errorProcessingResult{false}
 }
 
-func processTaskError(w http.ResponseWriter, result TaskResult, ctx context.Context) bool {
+func processTaskError(w http.ResponseWriter, result TaskResult, ctx context.Context) errorProcessingResult {
 	return processError(w, result.Err, ctx)
 }
 
-func processTaskResponse(w http.ResponseWriter, result TaskResult, ctx context.Context) {
-	if !processTaskError(w, result, ctx) {
-		return
+type processTaskResponseResult struct {
+	hadError bool
+}
+
+func processTaskResponse(w http.ResponseWriter, result TaskResult, ctx context.Context) processTaskResponseResult {
+	if processTaskError(w, result, ctx).hadError {
+		return processTaskResponseResult{true}
 	}
 
 	if result.Flags.Has(AuthInfoTaskResultFlag) {
 		processAuthResponse(ctx, w, result)
-		return
+		return processTaskResponseResult{false}
 	}
 
 	if result.Flags.Has(LogoutTaskResultFlag) && config.UseCookies() {
@@ -139,6 +148,8 @@ func processTaskResponse(w http.ResponseWriter, result TaskResult, ctx context.C
 		Session:  result.SessionKey,
 		Payload:  result.Payload,
 	}), ctx)
+
+	return processTaskResponseResult{false}
 }
 
 func decodeAndValidate[T WithValidation](r *http.Request) (T, error) {
@@ -190,16 +201,20 @@ func getRequestMetadataFromContextOrPanic(ctx context.Context) *httpTools.Reques
 	return md
 }
 
-func processLimiter(limiter ratelimiter.Limiter, key string, w http.ResponseWriter, ctx context.Context) (bool, error) {
+type processLimiterResult struct {
+	hadError bool
+	allowed  bool
+}
+
+func processLimiter(limiter ratelimiter.Limiter, key string, w http.ResponseWriter, ctx context.Context) processLimiterResult {
 	if allow, err := limiter.Allow(ctx, key); err != nil {
-		return allow, err
+		processError(w, types.NewInternalError("limiter error", err), ctx)
+		return processLimiterResult{true, false}
 	} else if !allow {
-		requestLogger := getRequestLogger(ctx)
-		requestLogger.Warn("rate limit exceeded")
-		logTransportError(httpTools.WriteTooManyRequests(w), ctx)
-		return false, nil
+		processError(w, types.TooManyRequests, ctx)
+		return processLimiterResult{false, false}
 	}
-	return true, nil
+	return processLimiterResult{false, true}
 }
 
 func createCookie(name string, val string, expires time.Time) *http.Cookie {
@@ -310,6 +325,22 @@ func processAuthResponse(ctx context.Context, w http.ResponseWriter, taskResult 
 	return false
 }
 
+var verifyUserMFATokenOnLoginLimiter ratelimiter.TotalLimiter
+var verifyUserMFATokenOnLoginLimiterOnce sync.Once
+
+func getVerifyUserMFATokenOnLoginLimiter() ratelimiter.TotalLimiter {
+	verifyUserMFATokenOnLoginLimiterOnce.Do(func() {
+		verifyUserMFATokenOnLoginLimiter = ratelimiter.NewTotalLimiter("verifyUserMFATokenOnLogin", 3)
+	})
+	return verifyUserMFATokenOnLoginLimiter
+}
+
+func dropUserMFATokenOnLoginLimiter(ctx context.Context, key string) {
+	if err := getVerifyUserMFATokenOnLoginLimiter().Drop(context.Background(), key); err != nil {
+		getRequestLogger(ctx).Warn("unable to drop limiter", zap.Error(err))
+	}
+}
+
 func createLogin() http.Handler {
 	//originLimiter := ratelimiter.NewLimiter(rate.Every(10*time.Millisecond), 100)
 	userLimiter := ratelimiter.NewLimiter("createLoginUser", 2, time.Second)
@@ -331,19 +362,17 @@ func createLogin() http.Handler {
 				return
 			}
 
-			if allowed, err := processLimiter(userLimiter, value.User, w, r.Context()); err != nil {
-				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
-					return
-				}
-			} else if !allowed {
+			if !processLimiter(userLimiter, value.User, w, r.Context()).allowed {
 				return
 			}
 
 			trc, err := createLoginTask(r.Context(), newSessionKey(), value.User, value.Password, value.Remember)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
+
+			dropUserMFATokenOnLoginLimiter(r.Context(), value.User)
 
 			processTaskResponse(w, <-trc, r.Context())
 		})
@@ -362,7 +391,7 @@ func createMFASetup() http.Handler {
 
 			trc, err := createMFASetupTask(r.Context(), value.Session, value.User, types.MFAType(value.MFAType))
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
@@ -383,17 +412,13 @@ func createMFASetupVerifySoftwareToken() http.Handler {
 				return
 			}
 
-			if allowed, err := processLimiter(userLimiter, value.User, w, r.Context()); err != nil {
-				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
-					return
-				}
-			} else if !allowed {
+			if !processLimiter(userLimiter, value.User, w, r.Context()).allowed {
 				return
 			}
 
 			trc, err := createMFASetupVerifySoftwareTokenTask(r.Context(), value.Session, value.User, value.Code)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
@@ -406,6 +431,12 @@ func createMFASetupVerifySoftwareToken() http.Handler {
 func createMFAVerify() http.Handler {
 	userLimiter := ratelimiter.NewLimiter("createMFAVerifyUser", 5, time.Second)
 
+	dropUserLoginSession := func(ctx context.Context, loginSessionKey string) {
+		if err := dropLoginSession(context.Background(), loginSessionKey); err != nil {
+			getRequestLogger(ctx).Warn("unable to drop limiter", zap.Error(err))
+		}
+	}
+
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			r, cancel := attachDeadline(r)
@@ -416,28 +447,39 @@ func createMFAVerify() http.Handler {
 				return
 			}
 
-			if allowed, err := processLimiter(userLimiter, value.User, w, r.Context()); err != nil {
-				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
+			if !processLimiter(userLimiter, value.User, w, r.Context()).allowed {
+				return
+			}
+
+			if allowed, err := verifyUserMFATokenOnLoginLimiter.Allow(r.Context(), value.User); err != nil {
+				processError(w, types.NewInternalError("limiter error", err), r.Context())
+				return
+			} else {
+				if !allowed {
+					dropUserMFATokenOnLoginLimiter(r.Context(), value.User)
+					dropUserLoginSession(r.Context(), value.Session)
+					processError(w, types.UnauthorizedError, r.Context())
 					return
 				}
-			} else if !allowed {
-				return
 			}
 
 			trc, err := createMFAVerifyTask(r.Context(), value.Session, value.User, value.Code)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
 			taskResult := <-trc
 
-			processTaskResponse(w, taskResult, r.Context())
+			if !processTaskResponse(w, taskResult, r.Context()).hadError {
+				dropUserMFATokenOnLoginLimiter(r.Context(), value.User)
+			}
 		})
 }
 
 func createRefreshToken() http.Handler {
 	tokenLimiter := ratelimiter.NewLimiter("createRefreshToken", 5, time.Second)
+	userLimiter := ratelimiter.NewLimiter("createRefreshTokenUser", 5, time.Second)
 
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -451,17 +493,13 @@ func createRefreshToken() http.Handler {
 				return
 			}
 
-			if allowed, err := processLimiter(tokenLimiter, value.Token, w, r.Context()); err != nil {
-				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
-					return
-				}
-			} else if !allowed {
+			if !processLimiter(tokenLimiter, value.Token, w, r.Context()).allowed || !processLimiter(userLimiter, value.Token, w, r.Context()).allowed {
 				return
 			}
 
 			trc, err := createRefreshTokenTask(r.Context(), value.User, value.Token, value.Remember)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
@@ -484,7 +522,7 @@ func createLogOut() http.Handler {
 
 			trc, err := createLogOutTask(r.Context(), token)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
@@ -505,7 +543,7 @@ func createSatisfyPasswordUpdateRequest() http.Handler {
 
 			trc, err := createSatisfyPasswordUpdateRequestTask(r.Context(), value.Session, value.User, value.Password, value.Attributes)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
@@ -527,7 +565,7 @@ func createUpdatePasswordRequest() http.Handler {
 			}
 			trc, err := createUpdatePasswordTask(r.Context(), value.CurrentPassword, value.NewPassword)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
@@ -545,7 +583,7 @@ func createGetMFAStatus() http.Handler {
 
 			trc, err := createGetMFAStatusTask(r.Context())
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
@@ -567,7 +605,7 @@ func createUpdateMFA() http.Handler {
 			}
 			trc, err := createUpdateMFASoftwareTokenTask(r.Context(), newSessionKey(), value.MFAType)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
@@ -589,7 +627,7 @@ func createVerifyUpdateMFA() http.Handler {
 			}
 			trc, err := createVerifyMFAUpdateTask(r.Context(), value.Session, value.Code)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
@@ -611,7 +649,7 @@ func createSelectMFA() http.Handler {
 			}
 			trc, err := createSelectMFATask(r.Context(), value.Session, value.User, value.MFAType)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
@@ -634,17 +672,13 @@ func createInitiatePasswordResetRequest() http.Handler {
 				return
 			}
 
-			if allowed, err := processLimiter(emailLimiter, value.Email, w, r.Context()); err != nil {
-				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
-					return
-				}
-			} else if !allowed {
+			if !processLimiter(emailLimiter, value.Email, w, r.Context()).allowed {
 				return
 			}
 
 			trc, err := createInitiatePasswordResetTask(r.Context(), value.Email)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
@@ -669,12 +703,12 @@ func createResetPasswordRequest() http.Handler {
 
 			trc, err := createResetPasswordTask(r.Context(), string(token))
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
 			taskResult := <-trc
-			if !processTaskError(w, taskResult, r.Context()) {
+			if processTaskError(w, taskResult, r.Context()).hadError {
 				return
 			}
 
@@ -695,17 +729,13 @@ func createFinalizePasswordResetRequest() http.Handler {
 				return
 			}
 
-			if allowed, err := processLimiter(userLimiter, value.User, w, r.Context()); err != nil {
-				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
-					return
-				}
-			} else if !allowed {
+			if !processLimiter(userLimiter, value.User, w, r.Context()).allowed {
 				return
 			}
 
 			trc, err := createFinalizePasswordResetTask(r.Context(), value.User, value.Code, value.Password)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
@@ -727,21 +757,17 @@ func createUnmaskToken(getParams func(r *http.Request) (string, types.GenericErr
 
 			token, err := getParams(r)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
-			if allowed, err := processLimiter(tokenLimiter, token, w, r.Context()); err != nil {
-				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
-					return
-				}
-			} else if !allowed {
+			if !processLimiter(tokenLimiter, token, w, r.Context()).allowed {
 				return
 			}
 
 			trc, err := createUnmaskTokenTask(r.Context(), token)
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 
@@ -774,7 +800,7 @@ func createUnmaskTokenPost() http.Handler {
 }
 
 func createGetProfileRequest() http.Handler {
-	userLimiter := ratelimiter.NewLimiter("createProfileRequest", 6000, time.Minute)
+	tokenLimiter := ratelimiter.NewLimiter("createProfileRequest", 6000, time.Minute)
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			r, cancel := attachDeadline(r)
@@ -787,17 +813,13 @@ func createGetProfileRequest() http.Handler {
 				return
 			}
 
-			if allowed, err := processLimiter(userLimiter, token, w, r.Context()); err != nil {
-				if !processError(w, types.NewInternalError("limiter error", err), r.Context()) {
-					return
-				}
-			} else if !allowed {
+			if !processLimiter(tokenLimiter, token, w, r.Context()).allowed {
 				return
 			}
 
 			trc, err := createGetProfileTask(r.Context())
 
-			if !processError(w, err, r.Context()) {
+			if processError(w, err, r.Context()).hadError {
 				return
 			}
 

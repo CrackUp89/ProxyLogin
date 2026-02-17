@@ -27,10 +27,10 @@ type MasqueradedToken struct {
 type ErrorType string
 
 const (
-	AuthErrorType     ErrorType = "auth"
-	BadDataErrorType  ErrorType = "bad_data"
-	InternalErrorType ErrorType = "internal"
-	OverloadErrorType ErrorType = "overload"
+	AuthErrorType            ErrorType = "auth"
+	BadDataErrorType         ErrorType = "bad_data"
+	InternalErrorType        ErrorType = "internal"
+	TooManyRequestsErrorType ErrorType = "too_many_requests"
 )
 
 type GenericError interface {

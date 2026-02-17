@@ -457,6 +457,10 @@ func getRequestLoggerFromTask(task Task) *zap.Logger {
 	return getRequestLoggerFromContext(task.Context)
 }
 
+func dropLoginSession(ctx context.Context, loginSessionKey string) error {
+	return sessionStorage.DropLoginSession(ctx, loginSessionKey)
+}
+
 func processLoginTask(task loginTask) {
 	if !checkTaskContext(task.Task) {
 		return
@@ -672,6 +676,20 @@ func verifyMFACode(session *LoginSession, task mfaVerifyTask, step NextStep) {
 
 	result, err := cognitoClient.RespondToAuthChallenge(task.Context, challengeResp)
 	if err != nil {
+		var cm *cognitoTypes.CodeMismatchException
+		if errors.As(err, &cm) {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.NewBadRequestError("invalid MFA code", "invalid MFA code", err),
+			}
+			return
+		}
+		var na *cognitoTypes.NotAuthorizedException
+		if errors.As(err, &na) {
+			task.ResultChan <- TaskResult{
+				Err: loginTypes.UnauthorizedError,
+			}
+			return
+		}
 		task.ResultChan <- TaskResult{
 			Err: loginTypes.WrapWithInternalError(err),
 		}
@@ -721,7 +739,9 @@ func processMFAVerifyTask(task mfaVerifyTask) {
 		fallthrough
 	case NextStepMFASMSVerify:
 		verifyMFACode(session, task, session.NextStep)
+		return
 	}
+
 	task.ResultChan <- TaskResult{
 		Err: NewNextStepError([]NextStep{NextStepMFASoftwareTokenVerify, NextStepMFAEMailVerify, NextStepMFASMSVerify}, session.NextStep),
 	}
@@ -1208,31 +1228,6 @@ func processVerifyMFAUpdateTask(task verifyMFAUpdateTask) {
 	}
 
 	task.ResultChan <- TaskResult{}
-}
-
-func processVerifyUpdateMFATask(task verifyMFAUpdateTask) {
-	if !checkTaskContext(task.Task) {
-		return
-	}
-
-	requestLogger := getRequestLoggerFromTask(task.Task)
-
-	requestLogger.Log(processingLogLevel, "processing")
-
-	session := getLoginSession(task.Task, task.SessionKey)
-	if session == nil {
-		return
-	}
-
-	switch session.NextStep {
-	case NextStepMFASoftwareTokenSetupVerify:
-		processVerifyMFAUpdateTask(task)
-	default:
-		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewBadRequestError("MFA method not supported", "MFA method not supported", nil),
-		}
-		return
-	}
 }
 
 func processSelectMFATask(task selectMFATask) {
