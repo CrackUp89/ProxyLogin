@@ -54,6 +54,9 @@ func (e *InternalError) Error() string {
 }
 
 func (e *InternalError) PrivateError() string {
+	if e.originalError != nil {
+		return e.privateMessage + "; original error: " + e.originalError.Error()
+	}
 	return e.privateMessage
 }
 
