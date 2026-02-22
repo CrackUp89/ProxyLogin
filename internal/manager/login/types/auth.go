@@ -1,6 +1,9 @@
 package types
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 type TokenType string
 
@@ -55,7 +58,12 @@ func (e *InternalError) Error() string {
 
 func (e *InternalError) PrivateError() string {
 	if e.originalError != nil {
-		return e.privateMessage + "; original error: " + e.originalError.Error()
+		var ge GenericError
+		if errors.As(e.originalError, &ge) {
+			return e.privateMessage + "; " + e.originalError.Error() + "; " + ge.PrivateError()
+		}
+
+		return e.privateMessage + "; " + e.originalError.Error()
 	}
 	return e.privateMessage
 }
@@ -88,7 +96,12 @@ func (e *GenericAuthenticationError) Error() string {
 
 func (e *GenericAuthenticationError) PrivateError() string {
 	if e.originalError != nil {
-		return e.privateMessage + "; original error: " + e.originalError.Error()
+		var ge GenericError
+		if errors.As(e.originalError, &ge) {
+			return e.privateMessage + "; " + e.originalError.Error() + "; " + ge.PrivateError()
+		}
+
+		return e.privateMessage + "; " + e.originalError.Error()
 	}
 	return e.privateMessage
 }
@@ -117,7 +130,12 @@ func (e *BadRequestError) Error() string {
 
 func (e *BadRequestError) PrivateError() string {
 	if e.originalError != nil {
-		return e.privateMessage + "; original error: " + e.originalError.Error()
+		var ge GenericError
+		if errors.As(e.originalError, &ge) {
+			return e.privateMessage + "; " + e.originalError.Error() + "; " + ge.PrivateError()
+		}
+
+		return e.privateMessage + "; " + e.originalError.Error()
 	}
 	return e.privateMessage
 }
