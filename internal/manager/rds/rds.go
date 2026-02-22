@@ -15,6 +15,7 @@ var defaultKeyPrefix string
 func init() {
 	viper.SetDefault("redis.url", "redis://localhost:6379/0?protocol=3")
 	viper.SetDefault("redis.keyprefix", "proxylogin:")
+	viper.SetDefault("redis.clientname", "proxylogin")
 }
 
 func LoadConfig() {
@@ -23,6 +24,8 @@ func LoadConfig() {
 	if err != nil {
 		panic(err)
 	}
+
+	redisOptions.ClientName = viper.GetString("redis.clientname")
 
 	defaultKeyPrefix = viper.GetString("redis.keyprefix")
 }

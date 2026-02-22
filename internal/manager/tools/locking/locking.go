@@ -147,7 +147,8 @@ func (r *RedisReturnOnce[T]) Do(ctx context.Context, f ReturnOnceFunc[T]) (T, er
 		psErrChan := make(chan error)
 
 		defer func() {
-			_ = ps.Unsubscribe(ctx)
+			_ = ps.Unsubscribe(context.Background())
+			_ = ps.Close()
 		}()
 
 		psRecover := func() {
@@ -160,9 +161,16 @@ func (r *RedisReturnOnce[T]) Do(ctx context.Context, f ReturnOnceFunc[T]) (T, er
 		go func() {
 			defer psRecover()
 			for {
+				err := ctx.Err()
+				if err != nil {
+					psErrChan <- err
+					return
+				}
+
 				m, err := ps.ReceiveTimeout(ctx, r.ttl)
 				if err != nil {
 					psErrChan <- err
+					return
 				}
 
 				switch t := m.(type) {
