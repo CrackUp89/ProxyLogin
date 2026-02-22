@@ -281,6 +281,15 @@ func handleAuthResults(task Task, authResults *cognitoTypes.AuthenticationResult
 
 func handleAuthPayload(task Task, authPayload interface{}, remember bool, err error) {
 	if err != nil {
+		var ge loginTypes.GenericError
+		if errors.As(err, &ge) {
+			task.ResultChan <- TaskResult{
+				Err:   ge,
+				Flags: AuthInfoTaskResultFlag | LogoutTaskResultFlag,
+			}
+			return
+		}
+
 		task.ResultChan <- TaskResult{
 			Err:   loginTypes.NewInternalError("auth payload error", err),
 			Flags: AuthInfoTaskResultFlag | LogoutTaskResultFlag,
