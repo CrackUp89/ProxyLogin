@@ -87,6 +87,9 @@ func (e *GenericAuthenticationError) Error() string {
 }
 
 func (e *GenericAuthenticationError) PrivateError() string {
+	if e.originalError != nil {
+		return e.privateMessage + "; original error: " + e.originalError.Error()
+	}
 	return e.privateMessage
 }
 
@@ -113,6 +116,9 @@ func (e *BadRequestError) Error() string {
 }
 
 func (e *BadRequestError) PrivateError() string {
+	if e.originalError != nil {
+		return e.privateMessage + "; original error: " + e.originalError.Error()
+	}
 	return e.privateMessage
 }
 

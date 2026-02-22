@@ -119,7 +119,7 @@ func checkAuthToken(task Task, accessToken string) bool {
 
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "invalid token", err),
+			Err: loginTypes.NewGenericAuthenticationError("jwks validation failed", "invalid token", err), //todo: make a generic error type
 		}
 		return false
 	}
@@ -282,7 +282,7 @@ func handleAuthResults(task Task, authResults *cognitoTypes.AuthenticationResult
 func handleAuthPayload(task Task, authPayload interface{}, remember bool, err error) {
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err:   loginTypes.NewInternalError(err.Error(), err),
+			Err:   loginTypes.NewInternalError("auth payload error", err),
 			Flags: AuthInfoTaskResultFlag | LogoutTaskResultFlag,
 		}
 		return
@@ -442,7 +442,7 @@ func mapMFAList(mfaTypes []string) []loginTypes.MFAType {
 func checkTaskContext(t Task) bool {
 	if err := t.Context.Err(); err != nil {
 		t.ResultChan <- TaskResult{
-			Err: loginTypes.NewInternalError(err.Error(), err),
+			Err: loginTypes.NewInternalError("context error", err),
 		}
 		return false
 	}
@@ -499,7 +499,7 @@ func processLoginTask(task loginTask) {
 		}
 
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewInternalError(err.Error(), err),
+			Err: loginTypes.NewInternalError("unable to log in", err),
 		}
 		return
 	}
@@ -818,7 +818,7 @@ func processRefreshTokenTask(task refreshTokenTask) {
 			t, err := jwksValidator.ValidateToken(idToken)
 			if err != nil {
 				task.ResultChan <- TaskResult{
-					Err:   loginTypes.NewGenericAuthenticationError("invalid id token", "invalid id token", nil),
+					Err:   loginTypes.NewGenericAuthenticationError("invalid id token", "invalid id token", err),
 					Flags: LogoutTaskResultFlag,
 				}
 				return
@@ -850,7 +850,7 @@ func processRefreshTokenTask(task refreshTokenTask) {
 
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "authentication error", err),
+			Err: loginTypes.NewGenericAuthenticationError("unable to refresh token", "authentication error", err),
 		}
 		return
 	}
@@ -1040,7 +1040,7 @@ func processGetMFAStatusTask(task getMFAStatusTask) {
 
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "invalid token", err),
+			Err: loginTypes.NewGenericAuthenticationError("jwks validation failed", "invalid token", err),
 		}
 		return
 	}
@@ -1193,7 +1193,7 @@ func processVerifyMFAUpdateTask(task verifyMFAUpdateTask) {
 			return
 		}
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Authentication error", err),
+			Err: loginTypes.NewGenericAuthenticationError("token verification error", "Authentication error", err),
 		}
 		return
 	}
@@ -1274,7 +1274,7 @@ func processSelectMFATask(task selectMFATask) {
 	result, err := cognitoClient.RespondToAuthChallenge(task.Context, input)
 	if err != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewGenericAuthenticationError(err.Error(), "Authentication error", err),
+			Err: loginTypes.NewGenericAuthenticationError("auth challenge response error", "Authentication error", err),
 		}
 		return
 	}
@@ -1293,7 +1293,7 @@ func findUsersByEmail(ctx context.Context, email string) ([]cognitoTypes.UserTyp
 
 	result, err := cognitoClient.ListUsers(ctx, input)
 	if err != nil {
-		return nil, loginTypes.NewInternalError(err.Error(), err)
+		return nil, loginTypes.NewInternalError("unable to list users by email", err)
 	}
 
 	return result.Users, nil
@@ -1441,7 +1441,7 @@ func processResetPasswordTask(task resetPasswordTask) {
 	if err != nil {
 		if !redirectToPasswordErrorPageIfConfigured(task.Task, resetSettings.ErrorRedirectURL) {
 			task.ResultChan <- TaskResult{
-				Err: loginTypes.NewInternalError(err.Error(), err),
+				Err: loginTypes.NewInternalError("no password error redirect configured", err),
 			}
 		}
 		return
@@ -1490,7 +1490,7 @@ func processFinalizePasswordResetTask(task finalizePasswordResetTask) {
 		}
 
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewInternalError(err.Error(), err),
+			Err: loginTypes.NewInternalError("unable to finalize password reset", err),
 		}
 		return
 	}
@@ -1516,7 +1516,7 @@ func unmaskToken(ctx context.Context, token string, requestLogger *zap.Logger, r
 
 	d, err := masquerade.GetStorage().GetMasqueradedRecord(ctx, token)
 	if err != nil {
-		return nil, loginTypes.NewInternalError(err.Error(), err)
+		return nil, loginTypes.NewInternalError("unable to unmask token", err)
 	}
 
 	if d == nil {
@@ -1551,12 +1551,12 @@ func unmaskToken(ctx context.Context, token string, requestLogger *zap.Logger, r
 				})
 
 				if err != nil {
-					return nil, loginTypes.NewGenericAuthenticationError(err.Error(), "authentication error", err)
+					return nil, loginTypes.NewGenericAuthenticationError("unable to refresh token", "authentication error", err)
 				}
 
 				r, err := authResultToAuthTokenSet(authResults)
 				if err != nil {
-					return nil, loginTypes.NewGenericAuthenticationError(err.Error(), "authentication error", err)
+					return nil, loginTypes.NewGenericAuthenticationError("unable to convert auth result to token set", "authentication error", err)
 				}
 
 				return r, nil
@@ -1648,7 +1648,7 @@ func processGetProfileTask(task getProfileTask) {
 	t, jwksErr := cognitoIdTokenToProfile(idToken)
 	if jwksErr != nil {
 		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewInternalError(jwksErr.Error(), jwksErr),
+			Err: loginTypes.NewInternalError("jwks error", jwksErr),
 		}
 		return
 	}
