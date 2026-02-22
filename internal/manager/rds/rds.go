@@ -3,6 +3,7 @@ package rds
 import (
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/viper"
@@ -16,6 +17,9 @@ func init() {
 	viper.SetDefault("redis.url", "redis://localhost:6379/0?protocol=3")
 	viper.SetDefault("redis.keyprefix", "proxylogin:")
 	viper.SetDefault("redis.clientname", "proxylogin")
+	viper.SetDefault("redis.connmaxlifetime", 180)
+	viper.SetDefault("redis.maxactiveconns", 500)
+	viper.SetDefault("redis.maxidleconns", 500)
 }
 
 func LoadConfig() {
@@ -26,6 +30,9 @@ func LoadConfig() {
 	}
 
 	redisOptions.ClientName = viper.GetString("redis.clientname")
+	redisOptions.ConnMaxLifetime = viper.GetDuration("redis.connmaxlifetime") * time.Second
+	redisOptions.MaxActiveConns = viper.GetInt("redis.maxactiveconns")
+	redisOptions.MaxIdleConns = viper.GetInt("redis.maxidleconns")
 
 	defaultKeyPrefix = viper.GetString("redis.keyprefix")
 }
