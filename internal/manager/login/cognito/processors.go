@@ -107,6 +107,36 @@ func getRefreshTokenFromContext(ctx context.Context) string {
 	return ""
 }
 
+func validateTokenOrigin(token string) loginTypes.GenericError {
+	t, err := jwksValidator.ParseToken(token)
+	if t == nil || t.Claims == nil {
+		return loginTypes.NewGenericAuthenticationError("unable to parse token or token has no claims", "invalid token", err)
+	}
+
+	claims, ok := t.Claims.(jwt.MapClaims)
+	if !ok {
+		return loginTypes.NewGenericAuthenticationError("unable to extract token claims", "invalid token", nil)
+	}
+
+	tokenClientId, ok := claims["client_id"].(string)
+	if !ok || tokenClientId == "" {
+		return loginTypes.NewGenericAuthenticationError("auth token has no client ID", "invalid token", nil)
+	}
+	if tokenClientId != cognitoClientID {
+		return loginTypes.NewGenericAuthenticationError("auth token has invalid client ID", "invalid token", nil)
+	}
+
+	issuer, err := t.Claims.GetIssuer()
+	if err != nil || issuer == "" {
+		return loginTypes.NewGenericAuthenticationError("auth token has no issuer", "invalid token", nil)
+	}
+	if issuer != cognitoJWKSIssuer {
+		return loginTypes.NewGenericAuthenticationError("auth token has invalid issuer", "invalid token", nil)
+	}
+
+	return nil
+}
+
 func checkAuthToken(task Task, accessToken string) bool {
 	if accessToken == "" {
 		task.ResultChan <- TaskResult{
@@ -1158,28 +1188,6 @@ func processUpdateMFASoftwareTokenTask(task updateMFASoftwareTokenTask) {
 	}
 }
 
-func processUpdateMFATask(task updateMFASoftwareTokenTask) {
-	if !checkTaskContext(task.Task) {
-		return
-	}
-
-	requestLogger := getRequestLoggerFromTask(task.Task)
-
-	requestLogger.Log(processingLogLevel, "processing", zap.String("mfaType", string(task.MFAType)))
-
-	switch task.MFAType {
-	case loginTypes.MFATypeSoftwareToken:
-		processUpdateMFASoftwareTokenTask(task)
-		return
-	default:
-		task.ResultChan <- TaskResult{
-			Err: loginTypes.NewBadRequestError("MFA method not supported", "MFA method not supported", nil),
-		}
-		return
-	}
-
-}
-
 func processVerifyMFAUpdateTask(task verifyMFAUpdateTask) {
 	accessToken, ok := checkAuthContextValue(task.Task)
 	if !ok {
@@ -1544,8 +1552,24 @@ func unmaskToken(ctx context.Context, token string, requestLogger *zap.Logger, r
 			refreshRequired = true
 		}
 
+		//if at, ok := d.Tokens[loginTypes.AuthTokenType]; ok {
+		//	if err := validateTokenOrigin(at.Value); err != nil {
+		//		go func() {
+		//			requestLogger.Error("auth token is invalid; removing masqueraded record", zap.Error(err))
+		//			if err := masquerade.GetStorage().DropMasqueradedRecord(context.Background(), token); err != nil {
+		//				requestLogger.Error("failed to drop masqueraded token", zap.Error(err))
+		//			}
+		//		}()
+		//
+		//		return nil, err
+		//	}
+		//} else {
+		//	requestLogger.Warn("token set has no auth token - skipping pool check")
+		//}
+
 		if refreshRequired {
 			requestLogger.Log(processingLogLevel, "refresh required")
+
 			if rt, ok := d.Tokens[loginTypes.RefreshTokenType]; ok {
 				var ttl time.Duration
 				if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
@@ -1560,11 +1584,13 @@ func unmaskToken(ctx context.Context, token string, requestLogger *zap.Logger, r
 				})
 
 				if err != nil {
+					dropMasqueradedToken(token, requestLogger)
 					return nil, loginTypes.NewGenericAuthenticationError("unable to refresh token", "authentication error", err)
 				}
 
 				r, err := authResultToAuthTokenSet(authResults)
 				if err != nil {
+					dropMasqueradedToken(token, requestLogger)
 					return nil, loginTypes.NewGenericAuthenticationError("unable to convert auth result to token set", "authentication error", err)
 				}
 
