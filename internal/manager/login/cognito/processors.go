@@ -854,13 +854,9 @@ func processRefreshTokenTask(task refreshTokenTask) {
 		if idToken == "" {
 			user = ""
 		} else {
-			t, err := jwksValidator.ValidateToken(idToken)
+			t, err := jwksValidator.ParseToken(idToken)
 			if err != nil {
-				task.ResultChan <- TaskResult{
-					Err:   loginTypes.NewGenericAuthenticationError("invalid id token", "invalid id token", err),
-					Flags: LogoutTaskResultFlag,
-				}
-				return
+				requestLogger.Warn("id token is invalid, but will be used as a source of user name only", zap.Error(err))
 			}
 			if claims, ok := t.Claims.(jwt.MapClaims); t.Valid && ok {
 				if un, ok := claims["username"].(string); ok {
