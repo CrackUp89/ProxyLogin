@@ -89,9 +89,6 @@ func validateSettings() error {
 	if cognitoClientID == "" {
 		validationIssues["cognito.clientId"] = "must be set"
 	}
-	if cognitoClientSecret == "" {
-		validationIssues["cognito.clientSecret"] = "must be set"
-	}
 	if cognitoUserPoolID == "" {
 		validationIssues["cognito.userPoolId"] = "must be set"
 	}
