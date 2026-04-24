@@ -2,6 +2,7 @@ package cognito
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"proxylogin/internal/manager/config"
 	"proxylogin/internal/manager/login/passwordreset"
@@ -171,12 +172,20 @@ func decodeAndValidate[T WithValidation](r *http.Request) (T, error) {
 	return value, nil
 }
 
+func decodingErrorToRequestResponse(err error) *types.BadRequestError {
+	var ve *types.ValidationError
+	if errors.As(err, &ve) {
+		return types.NewBadRequestError(err.Error(), err.Error(), err)
+	}
+	return types.NewBadRequestError(err.Error(), "malformed request data", err)
+}
+
 func decodeAndProcessValidationErrors[T WithValidation](w http.ResponseWriter, r *http.Request) (T, bool) {
 	d, err := decodeAndValidate[T](r)
 	ctx := r.Context()
 
 	if err != nil {
-		logTransportError(httpTools.WriteBadRequest(w, types.NewBadRequestError(err.Error(), err.Error(), err)), ctx)
+		logTransportError(httpTools.WriteBadRequest(w, decodingErrorToRequestResponse(err)), ctx)
 		return d, false
 	}
 
@@ -514,9 +523,11 @@ func createLogOut() http.Handler {
 			var token string
 
 			if r.ContentLength > 0 {
-				value, requestErr := decodeAndValidate[logOutRequest](r)
-				if requestErr == nil {
+				value, ok := decodeAndProcessValidationErrors[logOutRequest](w, r)
+				if ok {
 					token = value.Token
+				} else {
+					return
 				}
 			}
 
@@ -792,7 +803,7 @@ func createUnmaskTokenPost() http.Handler {
 		value, err := decodeAndValidate[unmaskTokenRequest](r)
 
 		if err != nil {
-			return "", types.NewBadRequestError(err.Error(), err.Error(), err)
+			return "", decodingErrorToRequestResponse(err)
 		}
 
 		return value.Token, nil
