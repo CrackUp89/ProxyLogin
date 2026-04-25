@@ -41,6 +41,11 @@ func init() {
 	viper.SetDefault("http.cors.allowedMethods", "GET, POST, PUT, DELETE, OPTIONS")
 	viper.SetDefault("http.cors.allowedHeaders", "Content-Type, Device-Key, Location")
 	viper.SetDefault("http.cors.allowCredentials", true)
+
+	viper.SetDefault("http.readHeaderTimeout", 10)
+	viper.SetDefault("http.readTimeout", 30)
+	viper.SetDefault("http.writeTimeout", 60)
+	viper.SetDefault("http.idleTimeout", 120)
 }
 
 func Run() error {
@@ -52,14 +57,14 @@ func Run() error {
 	rds.LoadConfig()
 	ratelimiter.LoadConfig()
 	masquerade.LoadConfig()
-
-	var err error
+	httpTools.LoadConfig()
 	passwordreset.LoadConfig()
 
 	mux := http.NewServeMux()
 
 	common.AddRoutes(mux)
 
+	var err error
 	err = cognito.Start()
 	if err != nil {
 		return err
@@ -92,8 +97,12 @@ func Run() error {
 	//}()
 
 	httpServer := &http.Server{
-		Addr:    fmt.Sprintf("%s:%s", viper.GetString("http.address"), viper.GetString("http.port")),
-		Handler: handler,
+		Addr:              fmt.Sprintf("%s:%s", viper.GetString("http.address"), viper.GetString("http.port")),
+		Handler:           handler,
+		ReadHeaderTimeout: viper.GetDuration("http.readHeaderTimeout") * time.Second,
+		ReadTimeout:       viper.GetDuration("http.readTimeout") * time.Second,
+		WriteTimeout:      viper.GetDuration("http.writeTimeout") * time.Second,
+		IdleTimeout:       viper.GetDuration("http.idleTimeout") * time.Second,
 	}
 
 	serverErrors := make(chan error, 1)
@@ -132,13 +141,32 @@ func withCORSMiddleware(next http.Handler) http.Handler {
 	allowedOrigin := viper.GetString("http.cors.allowedOrigin")
 	allowedMethods := viper.GetString("http.cors.allowedMethods")
 	allowedHeaders := viper.GetString("http.cors.allowedHeaders")
-	allowCredentials := viper.GetString("http.cors.allowCredentials")
+	allowCredentials := viper.GetBool("http.cors.allowCredentials")
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+		origin := r.Header.Get("Origin")
+
+		if allowedOrigin == "*" {
+			if allowCredentials {
+				// "*" with credentials is invalid per CORS spec; reflect the request origin instead.
+				if origin != "" {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					w.Header().Set("Vary", "Origin")
+				}
+			} else {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			}
+		} else {
+			if origin == allowedOrigin {
+				w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			}
+		}
+
 		w.Header().Set("Access-Control-Allow-Methods", allowedMethods)
 		w.Header().Set("Access-Control-Allow-Headers", allowedHeaders)
-		w.Header().Set("Access-Control-Allow-Credentials", allowCredentials)
+		if allowCredentials {
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return

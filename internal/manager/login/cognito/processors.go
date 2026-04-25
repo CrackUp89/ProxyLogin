@@ -404,7 +404,7 @@ func handleChallenge(challenge cognitoTypes.ChallengeNameType, challengeParamete
 		nextStep = NextStepMFAEMailVerify
 		break
 	case cognitoTypes.ChallengeNameTypeSmsMfa:
-		nextStep = NextStepMFAEMailVerify
+		nextStep = NextStepMFASMSVerify
 		break
 	case cognitoTypes.ChallengeNameTypeNewPasswordRequired:
 		nextStep = NextStepNewPassword
@@ -993,7 +993,7 @@ func processLogOutTask(task logOutTask) {
 				}
 				dropMasqueradedToken(msq, requestLogger)
 				token = r.RefreshToken
-			} else if rt := getRefreshTokenFromContext(ctx); rt != "" {
+			} else if rt := getRefreshTokenFromContext(task.Context); rt != "" {
 				token = rt
 			} else {
 				requestLogger.Warn("no token provided in body and no token to unmask")
@@ -1296,7 +1296,8 @@ func processSelectMFATask(task selectMFATask) {
 }
 
 func findUsersByEmail(ctx context.Context, email string) ([]cognitoTypes.UserType, loginTypes.GenericError) {
-	filter := fmt.Sprintf("email = \"%s\"", email)
+	sanitized := strings.NewReplacer(`\`, "", `"`, "").Replace(email)
+	filter := fmt.Sprintf("email = \"%s\"", sanitized)
 
 	input := &cognitoidentityprovider.ListUsersInput{
 		UserPoolId: aws.String(cognitoUserPoolID),
@@ -1320,7 +1321,7 @@ type PasswordResetData struct {
 	CurrentYear   string `json:"currentYear"`
 }
 
-func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
+func processInitiatePasswordResetTask(task initiatePasswordResetTask) { //todo: only works with email. add ability to reset by user name (disabled by default)
 	if !checkTaskContext(task.Task) {
 		return
 	}
@@ -1346,9 +1347,23 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 			token := tools.GenerateRandomString(32)
 			user := users[0]
 
+			var email string
+			for _, attr := range user.Attributes {
+				if *attr.Name == "email" {
+					email = *attr.Value
+				}
+			}
+
+			//todo: check if email verified if required
+
+			if email == "" {
+				requestLogger.Warn("user has no email configured - using address provided in request", zap.String("email", task.Email))
+				email = task.Email
+			}
+
 			resetSettings := passwordreset.GetSettings()
 
-			if err := sessionStorage.CreateResetPasswordSession(context.Background(), token, *user.Username, task.Email, time.Now().Add(resetSettings.ValidFor)); err != nil {
+			if err := sessionStorage.CreateResetPasswordSession(context.Background(), token, *user.Username, email, time.Now().Add(resetSettings.ValidFor)); err != nil {
 				requestLogger.Error("failed to create password reset session", zap.Error(err))
 				return
 			}
@@ -1372,7 +1387,7 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 			input := &ses.SendTemplatedEmailInput{
 				Source: aws.String(resetSettings.Sender),
 				Destination: &sesTypes.Destination{
-					ToAddresses: []string{task.Email},
+					ToAddresses: []string{email},
 				},
 				Template:     aws.String(resetSettings.TemplateName),
 				TemplateData: aws.String(string(templateJSON)),
@@ -1384,7 +1399,7 @@ func processInitiatePasswordResetTask(task initiatePasswordResetTask) {
 				return
 			}
 
-			requestLogger.Info("sent reset password message", zap.String("email", task.Email), zap.String("user", *user.Username), zap.String("messageId", *result.MessageId))
+			requestLogger.Info("sent reset password message", zap.String("email", email), zap.String("user", *user.Username), zap.String("messageId", *result.MessageId))
 		}
 	}()
 

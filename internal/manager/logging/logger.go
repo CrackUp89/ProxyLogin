@@ -27,7 +27,7 @@ func LoadConfig() {
 	}
 
 	opts := []zap.Option{
-		zap.AddStacktrace(zap.ErrorLevel),
+		zap.AddStacktrace(zap.PanicLevel),
 	}
 
 	if viper.GetBool("logging.verbose") {
@@ -35,7 +35,7 @@ func LoadConfig() {
 	}
 
 	defer logger.Sync()
-	logger = logger.WithOptions(opts...).With(zap.String("instanceId", "instance.id"))
+	logger = logger.WithOptions(opts...).With(zap.String("instanceId", viper.GetString("instance.id")))
 }
 
 func GetRootLogger() *zap.Logger {

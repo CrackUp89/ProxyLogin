@@ -131,7 +131,7 @@ func (r mfaSetupVerifySoftwareTokenRequest) Validate() types.ValidationIssues {
 		errs["user"] = "User is required"
 	}
 	if len(r.Session) == 0 {
-		errs["password"] = "Session is required"
+		errs["session"] = "Session is required"
 	}
 	if len(r.Code) == 0 {
 		errs["code"] = "Code is required"
@@ -151,7 +151,7 @@ func (r mfaSoftwareTokenVerifyRequest) Validate() types.ValidationIssues {
 		errs["user"] = "User is required"
 	}
 	if len(r.Session) == 0 {
-		errs["password"] = "Session is required"
+		errs["session"] = "Session is required"
 	}
 	if len(r.Code) == 0 {
 		errs["code"] = "Code is required"

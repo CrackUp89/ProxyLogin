@@ -32,37 +32,15 @@ func newSessionKey() string {
 }
 
 func logTransportError(err error, ctx context.Context) {
-	if err != nil {
-		logger := getHandlersLogger()
-		fields := []zap.Field{
-			zap.Error(err),
-		}
-
-		md, ok := httpTools.GetRequestMetadataFromContext(ctx)
-		if ok {
-			fields = append(fields, md.GetZapFields()...)
-		} else {
-			logger.Error("failed to get request metadata", zap.Stack("stack"))
-		}
-
-		logger.Error("transport error", fields...)
-	}
+	httpTools.LogTransportError(err, ctx, getHandlersLogger())
 }
 
 func attachRequestLogger(ctx context.Context) (context.Context, *zap.Logger) {
-	l := httpTools.GetLoggerWithRequestMetadataFields(getHandlersLogger(), ctx)
-	return context.WithValue(ctx, "requestLogger", l), l
+	return httpTools.AttachRequestLogger(ctx, getHandlersLogger())
 }
 
 func getRequestLogger(ctx context.Context) *zap.Logger {
-	v := ctx.Value("requestLogger")
-	l, ok := v.(*zap.Logger)
-	if !ok {
-		logger := getHandlersLogger()
-		logger.Error("context has no logger. using default handler logger")
-		return logger
-	}
-	return l
+	return httpTools.GetRequestLogger(ctx, getHandlersLogger())
 }
 
 func getAuthTokenFromContext(ctx context.Context) string {
@@ -101,15 +79,15 @@ func processError(w http.ResponseWriter, err types.GenericError, ctx context.Con
 			logTransportError(httpTools.WriteBadRequest(w, err), ctx)
 			break
 		case types.TooManyRequestsErrorType:
-			requestLogger.Error("too many requests", zap.Error(err), zap.String("privateError", err.PrivateError()))
+			requestLogger.Warn("too many requests", zap.Error(err), zap.String("privateError", err.PrivateError()))
 			logTransportError(httpTools.WriteTooManyRequests(w), ctx)
 			break
 		case types.InternalErrorType:
-			requestLogger.Error("internal error", zap.Error(err), zap.String("privateError", err.PrivateError()))
+			requestLogger.Error("internal error", zap.Error(err), zap.String("privateError", err.PrivateError()), zap.Stack("stack"))
 			logTransportError(httpTools.WriteInternalServiceError(w, err), ctx)
 			break
 		default:
-			handlersLogger.Error("unknown error type", zap.Error(err), zap.String("type", string(err.Type())), zap.String("privateError", err.PrivateError()))
+			handlersLogger.Error("unknown error type", zap.Error(err), zap.String("type", string(err.Type())), zap.String("privateError", err.PrivateError()), zap.Stack("stack"))
 			logTransportError(httpTools.WriteInternalServiceError(w, err), ctx)
 			break
 		}
@@ -460,7 +438,7 @@ func createMFAVerify() http.Handler {
 				return
 			}
 
-			if allowed, err := verifyUserMFATokenOnLoginLimiter.Allow(r.Context(), value.User); err != nil {
+			if allowed, err := getVerifyUserMFATokenOnLoginLimiter().Allow(r.Context(), value.User); err != nil {
 				processError(w, types.NewInternalError("limiter error", err), r.Context())
 				return
 			} else {

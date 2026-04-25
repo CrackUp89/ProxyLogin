@@ -13,8 +13,42 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
+
+var proxySecret string
+var proxySecretHeader string
+var proxySecretStrict bool
+var realIPHeader string
+var forwardedForHeader string
+
+func init() {
+	viper.SetDefault("http.proxySecret", "")
+	viper.SetDefault("http.proxySecretHeader", "X-Proxy-Secret")
+	viper.SetDefault("http.proxySecretStrict", false)
+	viper.SetDefault("http.realIPHeader", "X-Real-IP")
+	viper.SetDefault("http.forwardedForHeader", "X-Forwarded-For")
+}
+
+func LoadConfig() {
+	proxySecret = viper.GetString("http.proxySecret")
+	proxySecretHeader = viper.GetString("http.proxySecretHeader")
+	proxySecretStrict = viper.GetBool("http.proxySecretStrict")
+	proxySecretCheckDisabled := proxySecret == "" || proxySecretHeader == ""
+
+	logger := getLogger()
+
+	realIPHeader = viper.GetString("http.realIPHeader")
+	if realIPHeader != "" && proxySecretCheckDisabled {
+		logger.Warn("http.realIPHeader is set, but http.proxySecret or http.proxySecretHeader is not set - this may allow real IP spoofing")
+	}
+
+	forwardedForHeader = viper.GetString("http.forwardedForHeader")
+	if forwardedForHeader != "" && proxySecretCheckDisabled {
+		logger.Warn("http.forwardedForHeader is set, but http.proxySecret or http.proxySecretHeader is not set - this may allow to spoof forwarding info")
+	}
+}
 
 var httpToolsLogger *zap.Logger
 
@@ -80,10 +114,9 @@ func WriteJSON(w http.ResponseWriter, data interface{}) error {
 	if data == nil {
 		w.WriteHeader(http.StatusOK)
 		return nil
-	} else {
-		if json.EncodeJSON(w, http.StatusOK, data) != nil {
-			return WriteInternalServiceError(w, nil)
-		}
+	}
+	if json.EncodeJSON(w, http.StatusOK, data) != nil {
+		return WriteInternalServiceError(w, nil)
 	}
 	return nil
 }
@@ -94,6 +127,7 @@ func MaxRequestSizeLimiterMiddleware(next http.Handler, maxContentLength int64) 
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxContentLength)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -135,29 +169,60 @@ func (receiver *RequestMetadata) GetClientIP() string {
 	if receiver.RealIP != "" {
 		return receiver.RealIP
 	}
-	return receiver.RemoteAddr[:strings.LastIndex(receiver.RemoteAddr, ":")]
+	lastIdx := strings.LastIndex(receiver.RemoteAddr, ":")
+	if lastIdx == -1 {
+		return receiver.RemoteAddr
+	}
+	return receiver.RemoteAddr[:lastIdx]
 }
 
-func GetLoggerWithRequestMetadataFields(l *zap.Logger, ctx context.Context) *zap.Logger {
-	md, ok := GetRequestMetadataFromContext(ctx)
-	if ok {
-		l = l.WithLazy(md.GetZapFields()...)
-	} else {
-		getLogger().Warn("context has no request metadata")
+func getLoggerWithRequestMetadataFields(l *zap.Logger, md *RequestMetadata) *zap.Logger {
+	if md == nil {
+		return l
 	}
-	return l
+	return l.WithLazy(md.GetZapFields()...)
+}
+
+func validateProxySecret(r *http.Request) (string, bool, bool) {
+	if proxySecret == "" || proxySecretHeader == "" {
+		return "", true, false
+	}
+	requestProxySecret := r.Header.Get(proxySecretHeader)
+	valid := requestProxySecret == proxySecret
+	return requestProxySecret, valid, !valid && proxySecretStrict
 }
 
 func WithRequestMetadataContextMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), "requestMetadata", RequestMetadata{
-			ID:           uuid.NewString(),
-			Host:         r.Host,
-			RequestURI:   r.RequestURI,
-			RemoteAddr:   r.RemoteAddr,
-			RealIP:       r.Header.Get("X-Real-IP"),
-			ForwardedFor: r.Header.Get("X-Forwarded-For"),
-		})
+		md := &RequestMetadata{
+			ID:         uuid.NewString(),
+			Host:       r.Host,
+			RequestURI: r.RequestURI,
+			RemoteAddr: r.RemoteAddr,
+		}
+
+		requestProxySecret, proxySecretValid, abort := validateProxySecret(r)
+
+		if !proxySecretValid {
+			getLoggerWithRequestMetadataFields(getLogger(), md).Error("proxy secret is invalid", zap.String("proxySecret", requestProxySecret))
+		}
+
+		if abort {
+			logTransportError(WriteUnauthorized(w, errors.New("invalid proxy secret")), GetRequestLogger(r.Context(), getLogger()), md)
+			return
+		}
+
+		if proxySecretValid && realIPHeader != "" {
+			md.RealIP = r.Header.Get(realIPHeader)
+		}
+
+		if proxySecretValid && forwardedForHeader != "" {
+			md.ForwardedFor = r.Header.Get(forwardedForHeader)
+		}
+
+		md.GetClientIP()
+
+		ctx := context.WithValue(r.Context(), "requestMetadata", md)
 
 		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
@@ -165,8 +230,8 @@ func WithRequestMetadataContextMiddleware(next http.Handler) http.Handler {
 }
 
 func GetRequestMetadataFromContext(ctx context.Context) (*RequestMetadata, bool) {
-	metadata, ok := ctx.Value("requestMetadata").(RequestMetadata)
-	return &metadata, ok
+	metadata, ok := ctx.Value("requestMetadata").(*RequestMetadata)
+	return metadata, ok
 }
 
 type RequestInfo struct {
@@ -212,4 +277,59 @@ func ReadFirstNamedCookie(r *http.Request, name string) *http.Cookie {
 		return nil
 	}
 	return cookies[0]
+}
+
+func getRequestLogger(ctx context.Context) *zap.Logger {
+	v := ctx.Value("requestLogger")
+	l, ok := v.(*zap.Logger)
+	if !ok {
+		logger := getLogger()
+		logger.Error("context has no logger. using default logger", zap.Stack("stack"))
+		return logger
+	}
+	return l
+}
+
+func logTransportError(err error, logger *zap.Logger, md *RequestMetadata) {
+	if err != nil {
+		fields := []zap.Field{
+			zap.Error(err),
+		}
+
+		if md != nil {
+			fields = append(fields, md.GetZapFields()...)
+		}
+		logger.Error("transport error", fields...)
+	}
+}
+
+func LogTransportError(err error, ctx context.Context, logger *zap.Logger) {
+	if err != nil {
+		md, ok := GetRequestMetadataFromContext(ctx)
+		if !ok {
+			logger.Error("failed to get request metadata", zap.Stack("stack"))
+		}
+		logTransportError(err, logger, md)
+	}
+}
+
+func AttachRequestLogger(ctx context.Context, baseLogger *zap.Logger) (context.Context, *zap.Logger) {
+	md, ok := GetRequestMetadataFromContext(ctx)
+	if !ok {
+		getLogger().Warn("context has no request metadata")
+	}
+
+	l := getLoggerWithRequestMetadataFields(baseLogger, md)
+	return context.WithValue(ctx, "requestLogger", l), l
+}
+
+func GetRequestLogger(ctx context.Context, fallbackLogger *zap.Logger) *zap.Logger {
+	v := ctx.Value("requestLogger")
+	l, ok := v.(*zap.Logger)
+	if !ok {
+		logger := fallbackLogger
+		logger.Error("context has no logger. using default handler logger", zap.Stack("stack"))
+		return logger
+	}
+	return l
 }
