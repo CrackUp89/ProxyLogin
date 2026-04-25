@@ -1296,8 +1296,10 @@ func processSelectMFATask(task selectMFATask) {
 }
 
 func findUsersByEmail(ctx context.Context, email string) ([]cognitoTypes.UserType, loginTypes.GenericError) {
-	sanitized := strings.NewReplacer(`\`, "", `"`, "").Replace(email)
-	filter := fmt.Sprintf("email = \"%s\"", sanitized)
+	if strings.ContainsAny(email, "\\\"'") {
+		return nil, loginTypes.NewBadRequestError("invalid email address", "invalid email address", nil)
+	}
+	filter := fmt.Sprintf("email = \"%s\"", email)
 
 	input := &cognitoidentityprovider.ListUsersInput{
 		UserPoolId: aws.String(cognitoUserPoolID),
