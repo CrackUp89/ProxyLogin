@@ -27,7 +27,7 @@ func init() {
 	viper.SetDefault("password.reset.sender", "")
 	viper.SetDefault("password.reset.templateName", "PasswordResetTemplate")
 	viper.SetDefault("password.reset.baseURL", "")
-	viper.SetDefault("password.reset.redirectURL", "http://localhost/reset-password?user=%[1]s")
+	viper.SetDefault("password.reset.redirectURL", "http://localhost/reset-password?token=%[1]s")
 }
 
 func LoadConfig() {

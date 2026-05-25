@@ -2,11 +2,8 @@ package http
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"proxylogin/internal/manager/logging"
-	"proxylogin/internal/manager/login/types"
-	"proxylogin/internal/manager/tools/json"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,79 +54,6 @@ func getLogger() *zap.Logger {
 		httpToolsLogger = logging.NewLogger("httpTools")
 	}
 	return httpToolsLogger
-}
-
-type ErrorResponse struct {
-	Code    int    `json:"code"`
-	Message string `json:"message,omitempty"`
-}
-
-func NewErrorResponse(code int, message string) ErrorResponse {
-	return ErrorResponse{Code: code, Message: message}
-}
-
-func WriteTooManyRequests(w http.ResponseWriter) error {
-	return json.EncodeJSON(w, http.StatusTooManyRequests, NewErrorResponse(-2, "too many requests"))
-}
-
-func WriteBadRequest(w http.ResponseWriter, err error) error {
-	var msg string
-	code := -1
-	if err != nil {
-		msg = err.Error()
-		var v types.GenericError
-		if errors.As(err, &v) {
-			code = v.Code()
-		}
-	} else {
-		msg = "Bad Request"
-	}
-
-	return json.EncodeJSON(w, http.StatusBadRequest, NewErrorResponse(code, msg))
-}
-
-func WriteInternalServiceError(w http.ResponseWriter, err error) error {
-	var msg string
-	if err != nil {
-		msg = err.Error()
-	} else {
-		msg = "Internal service error"
-	}
-
-	return json.EncodeJSON(w, http.StatusInternalServerError, NewErrorResponse(http.StatusInternalServerError, msg))
-}
-
-func WriteUnauthorized(w http.ResponseWriter, err error) error {
-	var msg string
-	if err != nil {
-		msg = err.Error()
-	} else {
-		msg = "Unauthorized"
-	}
-
-	return json.EncodeJSON(w, http.StatusUnauthorized, NewErrorResponse(http.StatusUnauthorized, msg))
-}
-
-func WriteJSON(w http.ResponseWriter, data interface{}) error {
-	if data == nil {
-		w.WriteHeader(http.StatusOK)
-		return nil
-	}
-	if json.EncodeJSON(w, http.StatusOK, data) != nil {
-		return WriteInternalServiceError(w, nil)
-	}
-	return nil
-}
-
-func MaxRequestSizeLimiterMiddleware(next http.Handler, maxContentLength int64) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.ContentLength > maxContentLength {
-			w.WriteHeader(http.StatusRequestEntityTooLarge)
-			return
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxContentLength)
-		next.ServeHTTP(w, r)
-	})
 }
 
 func WithAutoRecoverMiddleware(next http.Handler) http.Handler {
@@ -208,7 +132,7 @@ func WithRequestMetadataContextMiddleware(next http.Handler) http.Handler {
 		}
 
 		if abort {
-			logTransportError(WriteUnauthorized(w, errors.New("invalid proxy secret")), GetRequestLogger(r.Context(), getLogger()), md)
+			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 
@@ -269,25 +193,6 @@ func (rt *RequestTracker) GetActiveRequests() []RequestInfo {
 		return true
 	})
 	return active
-}
-
-func ReadFirstNamedCookie(r *http.Request, name string) *http.Cookie {
-	cookies := r.CookiesNamed(name)
-	if len(cookies) == 0 {
-		return nil
-	}
-	return cookies[0]
-}
-
-func getRequestLogger(ctx context.Context) *zap.Logger {
-	v := ctx.Value("requestLogger")
-	l, ok := v.(*zap.Logger)
-	if !ok {
-		logger := getLogger()
-		logger.Error("context has no logger. using default logger", zap.Stack("stack"))
-		return logger
-	}
-	return l
 }
 
 func logTransportError(err error, logger *zap.Logger, md *RequestMetadata) {

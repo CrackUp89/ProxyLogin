@@ -2,7 +2,7 @@ package ratelimiter
 
 import (
 	"context"
-	"proxylogin/internal/manager/rds"
+	"proxylogin/internal/manager/redisclient"
 	"sync"
 	"time"
 
@@ -138,9 +138,9 @@ func NewRedisRateLimiter(name string, limit int, window time.Duration) *RedisRat
 }
 
 func (rrl *RedisRateLimiter) Allow(ctx context.Context, key string) (bool, error) {
-	redisKey := rds.BuildKey("ratelimit:", rrl.name, ":", key)
+	redisKey := redisclient.BuildKey("ratelimit:", rrl.name, ":", key)
 
-	pipe := rds.GetClient().Pipeline()
+	pipe := redisclient.GetClient().Pipeline()
 	incr := pipe.Incr(ctx, redisKey)
 	pipe.Expire(ctx, redisKey, rrl.window)
 
@@ -249,9 +249,9 @@ func (l *RedisTotalLimiter) Allow(ctx context.Context, key string) (bool, error)
 		return true, nil
 	}
 
-	redisKey := rds.BuildKey("totallimit:", l.name, ":", key)
+	redisKey := redisclient.BuildKey("totallimit:", l.name, ":", key)
 
-	incr := rds.GetClient().Incr(ctx, redisKey)
+	incr := redisclient.GetClient().Incr(ctx, redisKey)
 	if err := incr.Err(); err != nil {
 		return false, err
 	}
@@ -272,6 +272,6 @@ func (l *RedisTotalLimiter) Allow(ctx context.Context, key string) (bool, error)
 }
 
 func (l *RedisTotalLimiter) Drop(ctx context.Context, key string) error {
-	redisKey := rds.BuildKey("totallimit:", l.name, ":", key)
-	return rds.GetClient().Del(ctx, redisKey).Err()
+	redisKey := redisclient.BuildKey("totallimit:", l.name, ":", key)
+	return redisclient.GetClient().Del(ctx, redisKey).Err()
 }

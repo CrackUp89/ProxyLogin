@@ -7,7 +7,7 @@ import (
 	"proxylogin/internal/manager/config"
 	"proxylogin/internal/manager/login/masquerade"
 	"proxylogin/internal/manager/ratelimiter"
-	"proxylogin/internal/manager/rds"
+	"proxylogin/internal/manager/redisclient"
 	"strings"
 	"sync"
 
@@ -42,7 +42,7 @@ func loadEnvFile() {
 func loadConfig() {
 	loadEnvFile()
 	config.LoadConfig()
-	rds.LoadConfig()
+	redisclient.LoadConfig()
 	ratelimiter.LoadConfig()
 	masquerade.LoadConfig()
 }
