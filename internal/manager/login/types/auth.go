@@ -14,17 +14,17 @@ const (
 )
 
 type AuthTokenSet struct {
-	AccessToken         string    `json:"access_token,omitempty"`
-	AccessTokenExpires  time.Time `json:"access_token_expires,omitempty"`
-	IdToken             string    `json:"id_token,omitempty"`
-	IdTokenExpires      time.Time `json:"id_token_expires,omitempty"`
-	RefreshToken        string    `json:"refresh_token,omitempty"`
+	AccessToken         string    `json:"access_token,omitempty" required:"true" doc:"Access token"`
+	AccessTokenExpires  time.Time `json:"access_token_expires,omitempty" required:"true"`
+	IdToken             string    `json:"id_token,omitempty" required:"true" doc:"Id token"`
+	IdTokenExpires      time.Time `json:"id_token_expires,omitempty" required:"true"`
+	RefreshToken        string    `json:"refresh_token,omitempty" doc:"Refresh token. Only sent if token refresh is enabled"`
 	RefreshTokenExpires time.Time `json:"refresh_token_expires_in,omitempty"`
 }
 
 type MasqueradedToken struct {
-	Token        string    `json:"token,omitempty"`
-	TokenExpires time.Time `json:"token_expires,omitempty"`
+	Token        string    `json:"token,omitempty" doc:"A token that can be exchanged with this server to retrieve the access and id tokens"`
+	TokenExpires time.Time `json:"token_expires,omitempty" doc:"Expiration time of underlying access and id tokens"`
 }
 
 type ErrorType string

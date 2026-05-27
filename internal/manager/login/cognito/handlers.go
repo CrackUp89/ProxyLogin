@@ -2,7 +2,6 @@ package cognito
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"proxylogin/internal/manager/config"
 	"proxylogin/internal/manager/login/passwordreset"
@@ -10,11 +9,13 @@ import (
 	"proxylogin/internal/manager/ratelimiter"
 	"proxylogin/internal/manager/tools"
 	httpTools "proxylogin/internal/manager/tools/http"
-	"proxylogin/internal/manager/tools/json"
+	humaTools "proxylogin/internal/manager/tools/huma"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"go.uber.org/zap"
 )
 
@@ -29,10 +30,6 @@ func getHandlersLogger() *zap.Logger {
 
 func newSessionKey() string {
 	return tools.GenerateRandomString(32)
-}
-
-func logTransportError(err error, ctx context.Context) {
-	httpTools.LogTransportError(err, ctx, getHandlersLogger())
 }
 
 func attachRequestLogger(ctx context.Context) (context.Context, *zap.Logger) {
@@ -61,151 +58,28 @@ func getAuthTokenFromContext(ctx context.Context) string {
 	panic("unknown auth type")
 }
 
-type errorProcessingResult struct {
-	hadError bool
-}
+// ---------------------------------------------------------------------------
+// Rate limiter helpers
+// ---------------------------------------------------------------------------
 
-func processError(w http.ResponseWriter, err types.GenericError, ctx context.Context) errorProcessingResult {
-	if err != nil {
-		requestLogger := getRequestLogger(ctx)
-
-		switch err.Type() {
-		case types.AuthErrorType:
-			requestLogger.Warn("authentication error", zap.Error(err), zap.String("privateError", err.PrivateError()))
-			logTransportError(httpTools.WriteUnauthorized(w, err), ctx)
-			break
-		case types.BadDataErrorType:
-			requestLogger.Warn("bad request", zap.Error(err), zap.String("privateError", err.PrivateError()))
-			logTransportError(httpTools.WriteBadRequest(w, err), ctx)
-			break
-		case types.TooManyRequestsErrorType:
-			requestLogger.Warn("too many requests", zap.Error(err), zap.String("privateError", err.PrivateError()))
-			logTransportError(httpTools.WriteTooManyRequests(w), ctx)
-			break
-		case types.InternalErrorType:
-			requestLogger.Error("internal error", zap.Error(err), zap.String("privateError", err.PrivateError()), zap.Stack("stack"))
-			logTransportError(httpTools.WriteInternalServiceError(w, err), ctx)
-			break
-		default:
-			handlersLogger.Error("unknown error type", zap.Error(err), zap.String("type", string(err.Type())), zap.String("privateError", err.PrivateError()), zap.Stack("stack"))
-			logTransportError(httpTools.WriteInternalServiceError(w, err), ctx)
-			break
-		}
-		return errorProcessingResult{true}
-	}
-
-	return errorProcessingResult{false}
-}
-
-func processTaskError(w http.ResponseWriter, result TaskResult, ctx context.Context) errorProcessingResult {
-	return processError(w, result.Err, ctx)
-}
-
-type processTaskResponseResult struct {
-	hadError bool
-}
-
-func processTaskResponse(w http.ResponseWriter, result TaskResult, ctx context.Context) processTaskResponseResult {
-	if processTaskError(w, result, ctx).hadError {
-		return processTaskResponseResult{true}
-	}
-
-	if result.Flags.Has(AuthInfoTaskResultFlag) {
-		processAuthResponse(ctx, w, result)
-		return processTaskResponseResult{false}
-	}
-
-	if result.Flags.Has(LogoutTaskResultFlag) && config.UseCookies() {
-		http.SetCookie(w, dropCookie(config.GetMasqueradedCookieName()))
-		http.SetCookie(w, dropCookie(config.GetAccessTokenCookieName()))
-		http.SetCookie(w, dropCookie(config.GetRefreshTokenCookieName()))
-		http.SetCookie(w, dropCookie(config.GetIDTokenCookieName()))
-	}
-
-	logTransportError(httpTools.WriteJSON(w, NextStepResponse{
-		NextStep: result.NextStep,
-		Session:  result.SessionKey,
-		Payload:  result.Payload,
-	}), ctx)
-
-	return processTaskResponseResult{false}
-}
-
-func decodeAndValidate[T WithValidation](r *http.Request) (T, error) {
-	ctx := r.Context()
+func checkLimiter(limiter ratelimiter.Limiter, key string, ctx context.Context) error {
 	requestLogger := getRequestLogger(ctx)
-
-	value, err := json.DecodeJSON[T](r)
-
-	if err != nil {
-		requestLogger.Warn("malformed JSON", zap.Error(err))
-		return value, err
-	}
-
-	if issues := value.Validate(); len(issues) > 0 {
-		requestLogger.Warn("invalid request params", zap.Error(err))
-		return value, types.NewValidationError(issues)
-	}
-
-	return value, nil
-}
-
-func decodingErrorToRequestResponse(err error) *types.BadRequestError {
-	var ve *types.ValidationError
-	if errors.As(err, &ve) {
-		return types.NewBadRequestError(err.Error(), err.Error(), err)
-	}
-	return types.NewBadRequestError(err.Error(), "malformed request data", err)
-}
-
-func decodeAndProcessValidationErrors[T WithValidation](w http.ResponseWriter, r *http.Request) (T, bool) {
-	d, err := decodeAndValidate[T](r)
-	ctx := r.Context()
-
-	if err != nil {
-		logTransportError(httpTools.WriteBadRequest(w, decodingErrorToRequestResponse(err)), ctx)
-		return d, false
-	}
-
-	return d, true
-}
-
-func attachLoggerContextToRequest(r *http.Request) *http.Request {
-	ctx, _ := attachRequestLogger(r.Context())
-	return r.WithContext(ctx)
-}
-
-func attachDeadline(r *http.Request) (*http.Request, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	return r.WithContext(ctx), cancel
-}
-
-func getRequestMetadataFromContextOrPanic(ctx context.Context) *httpTools.RequestMetadata {
-	md, ok := httpTools.GetRequestMetadataFromContext(ctx)
-	if !ok {
-		panic("failed to get request metadata")
-	}
-	return md
-}
-
-type processLimiterResult struct {
-	hadError bool
-	allowed  bool
-}
-
-func processLimiter(limiter ratelimiter.Limiter, key string, w http.ResponseWriter, ctx context.Context) processLimiterResult {
 	if allow, err := limiter.Allow(ctx, key); err != nil {
-		processError(w, types.NewInternalError("limiter error", err), ctx)
-		return processLimiterResult{true, false}
+		requestLogger.Error("limiter error", zap.Error(err))
+		return humaTools.MapError(types.NewInternalError("limiter error", err))
 	} else if !allow {
-		processError(w, types.TooManyRequests, ctx)
-		return processLimiterResult{false, false}
+		requestLogger.Warn("too many requests")
+		return humaTools.MapError(types.TooManyRequests)
 	}
-	return processLimiterResult{false, true}
+	return nil
 }
 
-func createCookie(name string, val string, expires time.Time) *http.Cookie {
-	result := &http.Cookie{
+// ---------------------------------------------------------------------------
+// Cookie helpers
+// ---------------------------------------------------------------------------
+
+func createCookie(name string, val string, expires time.Time) http.Cookie {
+	result := http.Cookie{
 		Name:     name,
 		Value:    val,
 		HttpOnly: config.UseHTTPOnlyCookies(),
@@ -227,8 +101,8 @@ func createCookie(name string, val string, expires time.Time) *http.Cookie {
 	return result
 }
 
-func dropCookie(name string) *http.Cookie {
-	return &http.Cookie{
+func dropCookie(name string) http.Cookie {
+	return http.Cookie{
 		Name:     name,
 		HttpOnly: config.UseHTTPOnlyCookies(),
 		Path:     config.GetCookiePath(),
@@ -239,78 +113,262 @@ func dropCookie(name string) *http.Cookie {
 	}
 }
 
-func processAuthResponse(ctx context.Context, w http.ResponseWriter, taskResult TaskResult) bool {
-	if taskResult.Err == nil && taskResult.Payload != nil {
-		remember := taskResult.Flags.Has(RememberTaskResultFlag)
-		if p, ok := taskResult.Payload.(*types.MasqueradedToken); ok {
-			var expires time.Time
-			if remember {
-				expires = p.TokenExpires
-			} else {
-				expires = time.Time{}
+// ---------------------------------------------------------------------------
+// Auth context middleware (huma-level)
+// ---------------------------------------------------------------------------
+
+func withAuthTokenContextMiddleware(ctx huma.Context, next func(huma.Context)) {
+	rCtx := ctx.Context()
+	if config.UseCookies() {
+		if config.UseMasquerade() {
+			val := readCookieFromHumaContext(ctx, config.GetMasqueradedCookieName())
+			if val != "" {
+				rCtx = context.WithValue(rCtx, AuthContextVarName, MasqueradedAuth{Token: val})
 			}
-			http.SetCookie(w, createCookie(config.GetMasqueradedCookieName(), p.Token, expires))
-			logTransportError(httpTools.WriteJSON(w, loginResponse{
-				LoginType: MasqueradeLoginResponseLoginType,
-			}), ctx)
-			return true
+		} else {
+			val := readCookieFromHumaContext(ctx, config.GetAccessTokenCookieName())
+			if val != "" {
+				rCtx = context.WithValue(rCtx, AuthContextVarName, TokenAuth{Token: val})
+			}
 		}
-		if p, ok := taskResult.Payload.(*types.AuthTokenSet); ok {
-			if config.UseCookies() {
-
-				if p.RefreshToken != "" {
-					var refreshExpires time.Time
-					if remember {
-						refreshExpires = p.RefreshTokenExpires
-					} else {
-						refreshExpires = time.Time{}
-					}
-					http.SetCookie(w, createCookie(config.GetRefreshTokenCookieName(), p.RefreshToken, refreshExpires))
-				}
-
-				var accessExpires time.Time
-				var idExpires time.Time
-				if remember {
-					accessExpires = p.AccessTokenExpires
-					idExpires = p.IdTokenExpires
-				} else {
-					accessExpires = time.Time{}
-					idExpires = time.Time{}
-				}
-
-				var expires time.Time
-
-				http.SetCookie(w, createCookie(config.GetAccessTokenCookieName(), p.AccessToken, accessExpires))
-				http.SetCookie(w, createCookie(config.GetIDTokenCookieName(), p.IdToken, idExpires))
-
-				resp := &loginResponse{
-					LoginType: CookiesLoginResponseLoginType,
-				}
-
-				if !p.AccessTokenExpires.IsZero() {
-					resp.Expires = &p.AccessTokenExpires
-				}
-
-				if !p.IdTokenExpires.IsZero() && p.IdTokenExpires.Before(expires) {
-					expires = p.IdTokenExpires
-				}
-
-				if !expires.IsZero() {
-					resp.Expires = &expires
-				}
-
-				logTransportError(httpTools.WriteJSON(w, resp), ctx)
-			} else {
-				logTransportError(httpTools.WriteJSON(w, loginResponse{
-					LoginType: TokenSetLoginResponseLoginType,
-					LoginData: p,
-				}), ctx)
-			}
-			return true
+	} else {
+		auth := ctx.Header("Authorization")
+		if strings.HasPrefix(auth, "Bearer ") {
+			rCtx = context.WithValue(rCtx, AuthContextVarName, TokenAuth{Token: strings.TrimPrefix(auth, "Bearer ")})
 		}
 	}
-	return false
+	ctx = huma.WithContext(ctx, rCtx)
+	next(ctx)
 }
+
+func withIdTokenContextMiddleware(ctx huma.Context, next func(huma.Context)) {
+	rCtx := ctx.Context()
+	if config.UseCookies() && !config.UseMasquerade() {
+		val := readCookieFromHumaContext(ctx, config.GetIDTokenCookieName())
+		if val != "" {
+			rCtx = context.WithValue(rCtx, IdTokenContextVarName, val)
+		}
+	}
+	ctx = huma.WithContext(ctx, rCtx)
+	next(ctx)
+}
+
+func withRefreshTokenContextMiddleware(ctx huma.Context, next func(huma.Context)) {
+	rCtx := ctx.Context()
+	if config.UseCookies() && !config.UseMasquerade() {
+		val := readCookieFromHumaContext(ctx, config.GetRefreshTokenCookieName())
+		if val != "" {
+			rCtx = context.WithValue(rCtx, RefreshTokenContextVarName, val)
+		}
+	}
+	ctx = huma.WithContext(ctx, rCtx)
+	next(ctx)
+}
+
+func withRequestLoggerMiddleware(ctx huma.Context, next func(huma.Context)) {
+	rCtx := ctx.Context()
+	rCtx, _ = attachRequestLogger(rCtx)
+	ctx = huma.WithContext(ctx, rCtx)
+	next(ctx)
+}
+
+func readCookieFromHumaContext(ctx huma.Context, name string) string {
+	cookieHeader := ctx.Header("Cookie")
+	if cookieHeader == "" {
+		return ""
+	}
+	header := http.Header{}
+	header.Set("Cookie", cookieHeader)
+	request := http.Request{Header: header}
+	c, err := request.Cookie(name)
+	if err != nil || c.Value == "" {
+		return ""
+	}
+	return c.Value
+}
+
+// ---------------------------------------------------------------------------
+// Task response helpers (return values instead of writing to ResponseWriter)
+// ---------------------------------------------------------------------------
+
+func logError(err types.GenericError, ctx context.Context) {
+	if err == nil {
+		return
+	}
+	requestLogger := getRequestLogger(ctx)
+	switch err.Type() {
+	case types.AuthErrorType:
+		requestLogger.Warn("authentication error", zap.Error(err), zap.String("privateError", err.PrivateError()))
+	case types.BadDataErrorType:
+		requestLogger.Warn("bad request", zap.Error(err), zap.String("privateError", err.PrivateError()))
+	case types.TooManyRequestsErrorType:
+		requestLogger.Warn("too many requests", zap.Error(err), zap.String("privateError", err.PrivateError()))
+	case types.InternalErrorType:
+		requestLogger.Error("internal error", zap.Error(err), zap.String("privateError", err.PrivateError()), zap.Stack("stack"))
+	default:
+		handlersLogger.Error("unknown error type", zap.Error(err), zap.String("type", string(err.Type())), zap.String("privateError", err.PrivateError()), zap.Stack("stack"))
+	}
+}
+
+func buildAuthResponse(_ context.Context, taskResult interface {
+	WithGenericError
+	WithAuthResults
+}) *TaskResponseOutput[*AuthTaskResponse] {
+	if taskResult.GetError() != nil {
+		return nil
+	}
+
+	taskAuthResults := taskResult.GetAuthResults()
+	if taskAuthResults == nil {
+		return nil
+	}
+
+	taskAuthResultsData := taskResult.GetAuthResults().GetAuthResultsData()
+	if taskAuthResultsData == nil {
+		return nil
+	}
+
+	remember := taskAuthResults.GetRemember()
+	if p, ok := taskAuthResultsData.(*types.MasqueradedToken); ok {
+		var expires time.Time
+		if remember {
+			expires = p.TokenExpires
+		} else {
+			expires = time.Time{}
+		}
+
+		if config.UseCookies() {
+			return &TaskResponseOutput[*AuthTaskResponse]{
+				Body: &AuthTaskResponse{
+					AuthResult: newLoginResponseMasquerade(nil),
+				},
+				SetCookie: []http.Cookie{
+					createCookie(config.GetMasqueradedCookieName(), p.Token, expires),
+				},
+			}
+		}
+
+		return &TaskResponseOutput[*AuthTaskResponse]{
+			Body: &AuthTaskResponse{
+				AuthResult: newLoginResponseMasquerade(p),
+			},
+		}
+	}
+
+	if p, ok := taskAuthResultsData.(*types.AuthTokenSet); ok {
+		if config.UseCookies() {
+			responseCookies := make([]http.Cookie, 0, 3)
+
+			if p.RefreshToken != "" {
+				var refreshExpires time.Time
+				if remember {
+					refreshExpires = p.RefreshTokenExpires
+				} else {
+					refreshExpires = time.Time{}
+				}
+				responseCookies = append(responseCookies, createCookie(config.GetRefreshTokenCookieName(), p.RefreshToken, refreshExpires))
+			}
+
+			var accessExpires time.Time
+			var idExpires time.Time
+			if remember {
+				accessExpires = p.AccessTokenExpires
+				idExpires = p.IdTokenExpires
+			} else {
+				accessExpires = time.Time{}
+				idExpires = time.Time{}
+			}
+
+			responseCookies = append(responseCookies,
+				createCookie(config.GetAccessTokenCookieName(), p.AccessToken, accessExpires),
+				createCookie(config.GetIDTokenCookieName(), p.IdToken, idExpires))
+
+			return &TaskResponseOutput[*AuthTaskResponse]{
+				Body: &AuthTaskResponse{
+					AuthResult: newLoginResponseTokenSet(nil),
+				},
+				SetCookie: responseCookies,
+			}
+		}
+
+		return &TaskResponseOutput[*AuthTaskResponse]{Body: &AuthTaskResponse{
+			AuthResult: newLoginResponseTokenSet(p),
+		}}
+	}
+	getHandlersLogger().Error("unknown auth payload type", zap.String("dataType", reflect.TypeOf(taskAuthResultsData).Name()))
+	return nil
+}
+
+func getLogOutCookies() []http.Cookie {
+	return []http.Cookie{
+		dropCookie(config.GetMasqueradedCookieName()),
+		dropCookie(config.GetAccessTokenCookieName()),
+		dropCookie(config.GetRefreshTokenCookieName()),
+		dropCookie(config.GetIDTokenCookieName()),
+	}
+}
+
+func processSideEffects[T any](sideEffects []SideEffect, response *TaskResponseOutput[T]) *TaskResponseOutput[T] {
+	for _, sideEffect := range sideEffects {
+		switch sideEffect.GetType() {
+		case LogOutSideEffect:
+			response.SetSetCookie(append(response.GetSetCookie(), getLogOutCookies()...))
+			break
+		}
+	}
+	return response
+}
+
+func buildTaskResponse(ctx context.Context, result TaskResult) (*GenericTaskResponseOutput, error) {
+	taskError := result.GetError()
+	if taskError != nil {
+		logError(taskError, ctx)
+		return nil, humaTools.MapError(taskError)
+	}
+
+	return processSideEffects(result.GetSideEffects(), &GenericTaskResponseOutput{
+		Body: result.GetPayload(),
+	}), nil
+}
+
+func buildLoginTaskResponse(ctx context.Context, result LoginStepResult) (*TaskResponseOutput[*AuthTaskResponse], error) {
+	taskError := result.GetError()
+	if taskError != nil {
+		logError(taskError, ctx)
+		return nil, humaTools.MapError(taskError)
+	}
+
+	if result.GetAuthResults() != nil {
+		return processSideEffects(result.GetSideEffects(), buildAuthResponse(ctx, result)), nil
+	}
+
+	return processSideEffects(result.GetSideEffects(), &TaskResponseOutput[*AuthTaskResponse]{
+		Body: &AuthTaskResponse{
+			NextStep: result.GetNextLoginStep(),
+		},
+	}), nil
+}
+
+func buildLoginFinalTaskResponse(ctx context.Context, result LoginFinalStepResult) (*TaskResponseOutput[*AuthTaskResponse], error) {
+	taskError := result.GetError()
+	if taskError != nil {
+		logError(taskError, ctx)
+		return nil, humaTools.MapError(taskError)
+	}
+
+	if result.GetAuthResults() != nil {
+		return processSideEffects(result.GetSideEffects(), buildAuthResponse(ctx, result)), nil
+	}
+
+	err := types.NewInternalError("task result is empty", nil)
+
+	logError(err, ctx)
+	return nil, humaTools.MapError(err)
+}
+
+// ---------------------------------------------------------------------------
+// MFA verify total limiter
+// ---------------------------------------------------------------------------
 
 var verifyUserMFATokenOnLoginLimiter ratelimiter.TotalLimiter
 var verifyUserMFATokenOnLoginLimiterOnce sync.Once
@@ -328,94 +386,207 @@ func dropUserMFATokenOnLoginLimiter(ctx context.Context, key string) {
 	}
 }
 
-func createLogin() http.Handler {
-	//originLimiter := ratelimiter.NewLimiter(rate.Every(10*time.Millisecond), 100)
+// ---------------------------------------------------------------------------
+// Huma handler registrations
+// ---------------------------------------------------------------------------
+
+func registerLogin(api huma.API) {
 	userLimiter := ratelimiter.NewLimiter("createLoginUser", 2, time.Second)
 
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			//md := getRequestMetadataFromContextOrPanic(r.Context())
+	huma.Register(api, huma.Operation{
+		OperationID:  "login",
+		Method:       http.MethodPost,
+		Path:         "/v1/login",
+		Summary:      "Authenticate user",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware},
+	}, func(ctx context.Context, input *LoginInput) (*TaskResponseOutput[*AuthTaskResponse], error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			//if !originLimiter.Allow(md.GetClientIP()) {
-			//	logTransportError(httpTools.WriteTooManyRequests(w), r.Context())
-			//	return
-			//}
+		if err := checkLimiter(userLimiter, input.Body.User, ctx); err != nil {
+			return nil, err
+		}
 
-			r, cancel := attachDeadline(r)
-			defer cancel()
+		trc, taskErr := createLoginTask(ctx, newSessionKey(), input.Body.User, input.Body.Password, input.Body.Remember)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
 
-			value, ok := decodeAndProcessValidationErrors[loginRequest](w, r)
-			if !ok {
-				return
-			}
+		dropUserMFATokenOnLoginLimiter(ctx, input.Body.User)
 
-			if !processLimiter(userLimiter, value.User, w, r.Context()).allowed {
-				return
-			}
-
-			trc, err := createLoginTask(r.Context(), newSessionKey(), value.User, value.Password, value.Remember)
-
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			dropUserMFATokenOnLoginLimiter(r.Context(), value.User)
-
-			processTaskResponse(w, <-trc, r.Context())
-		})
+		return buildLoginTaskResponse(ctx, <-trc)
+	})
 }
 
-func createMFASetup() http.Handler {
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
+func registerValidate(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID: "validate",
+		Method:      http.MethodPost,
+		Path:        "/v1/validate",
+		Summary:     "Validate tokens",
+		Description: "Validates one or more JWT tokens and returns per-token validity.\n\n" +
+			"**Token sources** (mutually exclusive):\n" +
+			"- **Cookie mode** — tokens are read automatically from the configured cookies " +
+			"(`token.cookies.accessCookieName`, `token.cookies.idCookieName`).\n" +
+			"- **Explicit map** — supply a `tokens` object whose keys are arbitrary names and values are raw JWT strings. " +
+			"When `tokens` is present, cookies are ignored.\n\n" +
+			"**Response status**:\n" +
+			"- `return_unauthorized: no` — always returns `200`.\n" +
+			"- `return_unauthorized: any` *(default)* — returns `401` if at least one token is invalid.\n" +
+			"- `return_unauthorized: all` — returns `401` only if every token is invalid.\n\n" +
+			"The response body shape is the same for both `200` and `401`: " +
+			"`tokens` maps each name to a boolean, and `validation_errors` (present when `return_errors: true`) " +
+			"maps each failed name to a human-readable error string.",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware},
+		Responses: map[string]*huma.Response{
+			"401": {
+				Content: map[string]*huma.MediaType{
+					"application/json": {
+						Schema: api.OpenAPI().Components.Schemas.Schema(reflect.TypeOf(TokenValidationTaskResponse{}), true, ""),
+					},
+				},
+				Description: "Returned if any / all tokens are invalid when `return_unauthorized` is set to `any` / `all`",
+			},
+			"default": {
+				Content: map[string]*huma.MediaType{
+					"application/json": {
+						Schema: defaultErrorResponseSchema,
+					},
+				},
+			},
+		},
+	}, func(ctx context.Context, input *TokenValidationInput) (*TokenValidationTaskOutput, error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			value, ok := decodeAndProcessValidationErrors[mfaSetupRequest](w, r)
+		tokens := input.Body.Tokens
+
+		if tokens == nil {
+			hc, ok := ctx.Value(humaTools.HumaContextKey).(huma.Context)
 			if !ok {
-				return
+				return nil, humaTools.MapError(types.NewInternalError("huma context not found", nil))
 			}
 
-			trc, err := createMFASetupTask(r.Context(), value.Session, value.User, types.MFAType(value.MFAType))
+			tokens = map[string]string{}
 
-			if processError(w, err, r.Context()).hadError {
-				return
+			addToken := func(tokenName string) {
+				if tokenName != "" {
+					if token := readCookieFromHumaContext(hc, tokenName); token != "" {
+						tokens[tokenName] = token
+					}
+				}
 			}
 
-			processTaskResponse(w, <-trc, r.Context())
-		})
+			addToken(config.GetAccessTokenCookieName())
+			addToken(config.GetIDTokenCookieName())
+		}
+
+		if len(tokens) == 0 {
+			return nil, humaTools.MapError(types.NewBadRequestError("no tokens provided", "no tokens provided", nil))
+		}
+
+		trc, taskErr := createTokenValidationTask(ctx, tokens)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
+
+		tr := <-trc
+
+		taskError := tr.GetError()
+		if taskError != nil {
+			logError(taskError, ctx)
+			return nil, humaTools.MapError(taskError)
+		}
+
+		result := &TokenValidationTaskResponse{
+			Tokens: tr.Validity,
+		}
+
+		if input.Body.ReturnErrors {
+			result.ValidationError = tr.ValidationErrors
+		}
+
+		status := http.StatusOK
+		switch input.Body.ReturnUnauthorized {
+		case ReturnUnauthorizedAny:
+			for _, valid := range tr.Validity {
+				if !valid {
+					status = http.StatusUnauthorized
+					break
+				}
+			}
+		case ReturnUnauthorizedAll:
+			status = http.StatusUnauthorized
+			for _, valid := range tr.Validity {
+				if valid {
+					status = http.StatusOK
+					break
+				}
+			}
+		}
+
+		return &TokenValidationTaskOutput{
+			Status: status,
+			Body:   result,
+		}, nil
+	})
 }
 
-func createMFASetupVerifySoftwareToken() http.Handler {
+func registerMFASetup(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID:  "login-mfa-setup",
+		Method:       http.MethodPost,
+		Path:         "/v1/login/mfa/setup",
+		Summary:      "Initiate MFA setup",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware},
+	}, func(ctx context.Context, input *MFASetupInput) (*TaskResponseOutput[*AuthTaskResponse], error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+
+		trc, taskErr := createMFASetupTask(ctx, input.Body.Session, input.Body.User, types.MFAType(input.Body.MFAType))
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
+
+		return buildLoginTaskResponse(ctx, <-trc)
+	})
+}
+
+func registerMFASetupVerifySoftwareToken(api huma.API) {
 	userLimiter := ratelimiter.NewLimiter("createMFASetupVerifySoftwareTokenUser", 5, time.Second)
 
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
+	huma.Register(api, huma.Operation{
+		OperationID:  "login-mfa-setup-verify",
+		Method:       http.MethodPost,
+		Path:         "/v1/login/mfa/setup/verify",
+		Summary:      "Verify MFA setup with TOTP code",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware},
+	}, func(ctx context.Context, input *MFASetupVerifySoftwareTokenInput) (*TaskResponseOutput[*AuthTaskResponse], error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			value, ok := decodeAndProcessValidationErrors[mfaSetupVerifySoftwareTokenRequest](w, r)
-			if !ok {
-				return
-			}
+		if err := checkLimiter(userLimiter, input.Body.User, ctx); err != nil {
+			return nil, err
+		}
 
-			if !processLimiter(userLimiter, value.User, w, r.Context()).allowed {
-				return
-			}
+		trc, taskErr := createMFASetupVerifySoftwareTokenTask(ctx, input.Body.Session, input.Body.User, input.Body.Code)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
 
-			trc, err := createMFASetupVerifySoftwareTokenTask(r.Context(), value.Session, value.User, value.Code)
-
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			taskResult := <-trc
-
-			processTaskResponse(w, taskResult, r.Context())
-		})
+		return buildLoginTaskResponse(ctx, <-trc)
+	})
 }
 
-func createMFAVerify() http.Handler {
+func registerMFAVerify(api huma.API) {
 	userLimiter := ratelimiter.NewLimiter("createMFAVerifyUser", 5, time.Second)
 
 	dropUserLoginSession := func(ctx context.Context, loginSessionKey string) {
@@ -424,518 +595,499 @@ func createMFAVerify() http.Handler {
 		}
 	}
 
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
+	huma.Register(api, huma.Operation{
+		OperationID:  "login-mfa-verify",
+		Method:       http.MethodPost,
+		Path:         "/v1/login/mfa/verify",
+		Summary:      "Verify MFA code during login",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware},
+	}, func(ctx context.Context, input *MFASoftwareTokenVerifyInput) (*TaskResponseOutput[*AuthTaskResponse], error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			value, ok := decodeAndProcessValidationErrors[mfaSoftwareTokenVerifyRequest](w, r)
-			if !ok {
-				return
-			}
+		if err := checkLimiter(userLimiter, input.Body.User, ctx); err != nil {
+			return nil, err
+		}
 
-			if !processLimiter(userLimiter, value.User, w, r.Context()).allowed {
-				return
-			}
+		if allowed, err := getVerifyUserMFATokenOnLoginLimiter().Allow(ctx, input.Body.User); err != nil {
+			logError(types.NewInternalError("limiter error", err), ctx)
+			return nil, humaTools.MapError(types.NewInternalError("limiter error", err))
+		} else if !allowed {
+			dropUserMFATokenOnLoginLimiter(ctx, input.Body.User)
+			dropUserLoginSession(ctx, input.Body.Session)
+			logError(types.UnauthorizedError, ctx)
+			return nil, humaTools.MapError(types.UnauthorizedError)
+		}
 
-			if allowed, err := getVerifyUserMFATokenOnLoginLimiter().Allow(r.Context(), value.User); err != nil {
-				processError(w, types.NewInternalError("limiter error", err), r.Context())
-				return
-			} else {
-				if !allowed {
-					dropUserMFATokenOnLoginLimiter(r.Context(), value.User)
-					dropUserLoginSession(r.Context(), value.Session)
-					processError(w, types.UnauthorizedError, r.Context())
-					return
-				}
-			}
+		trc, taskErr := createMFAVerifyTask(ctx, input.Body.Session, input.Body.User, input.Body.Code)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
 
-			trc, err := createMFAVerifyTask(r.Context(), value.Session, value.User, value.Code)
+		taskResult := <-trc
 
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
+		resp, err := buildLoginTaskResponse(ctx, taskResult)
+		if err == nil {
+			dropUserMFATokenOnLoginLimiter(ctx, input.Body.User)
+		}
 
-			taskResult := <-trc
-
-			if !processTaskResponse(w, taskResult, r.Context()).hadError {
-				dropUserMFATokenOnLoginLimiter(r.Context(), value.User)
-			}
-		})
+		return resp, err
+	})
 }
 
-func createRefreshToken() http.Handler {
+func registerSelectMFA(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID:  "login-mfa-select",
+		Method:       http.MethodPost,
+		Path:         "/v1/login/mfa/select",
+		Summary:      "Select MFA method during login",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware},
+	}, func(ctx context.Context, input *SelectMFAInput) (*TaskResponseOutput[*AuthTaskResponse], error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+
+		trc, taskErr := createSelectMFATask(ctx, input.Body.Session, input.Body.User, input.Body.MFAType)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
+
+		return buildLoginTaskResponse(ctx, <-trc)
+	})
+}
+
+func registerSatisfyPasswordUpdate(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID:  "login-password-update",
+		Method:       http.MethodPost,
+		Path:         "/v1/login/password/update",
+		Summary:      "Satisfy password update challenge during login",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware},
+	}, func(ctx context.Context, input *SatisfyPasswordUpdateInput) (*TaskResponseOutput[*AuthTaskResponse], error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+
+		trc, taskErr := createSatisfyPasswordUpdateRequestTask(ctx, input.Body.Session, input.Body.User, input.Body.Password, input.Body.Attributes)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
+
+		return buildLoginTaskResponse(ctx, <-trc)
+	})
+}
+
+func registerLogout(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID:  "logout",
+		Method:       http.MethodPost,
+		Path:         "/v1/logout",
+		Summary:      "Log out user",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, withAuthTokenContextMiddleware, withRefreshTokenContextMiddleware},
+	}, func(ctx context.Context, input *struct {
+		Body *logOutRequest `required:"false"`
+	}) (*GenericTaskResponseOutput, error) {
+		var token string
+		if input.Body != nil {
+			token = input.Body.Token
+		}
+
+		trc, taskErr := createLogOutTask(ctx, token)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
+
+		return buildTaskResponse(ctx, <-trc)
+	})
+}
+
+func registerRefreshToken(api huma.API) {
 	tokenLimiter := ratelimiter.NewLimiter("createRefreshToken", 5, time.Second)
 	userLimiter := ratelimiter.NewLimiter("createRefreshTokenUser", 5, time.Second)
 
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
+	huma.Register(api, huma.Operation{
+		OperationID:  "refresh",
+		Method:       http.MethodPost,
+		Path:         "/v1/refresh",
+		Summary:      "Refresh authentication tokens",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, withRefreshTokenContextMiddleware, withIdTokenContextMiddleware},
+	}, func(ctx context.Context, input *RefreshTokenInput) (*TaskResponseOutput[*AuthTaskResponse], error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			r = attachLoggerContextToRequest(r)
+		if err := checkLimiter(tokenLimiter, input.Body.Token, ctx); err != nil {
+			return nil, err
+		}
+		if err := checkLimiter(userLimiter, input.Body.Token, ctx); err != nil {
+			return nil, err
+		}
 
-			value, ok := decodeAndProcessValidationErrors[refreshTokenRequest](w, r)
-			if !ok {
-				return
-			}
+		trc, taskErr := createRefreshTokenTask(ctx, input.Body.User, input.Body.Token, input.Body.Remember)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
 
-			if !processLimiter(tokenLimiter, value.Token, w, r.Context()).allowed || !processLimiter(userLimiter, value.Token, w, r.Context()).allowed {
-				return
-			}
-
-			trc, err := createRefreshTokenTask(r.Context(), value.User, value.Token, value.Remember)
-
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			processTaskResponse(w, <-trc, r.Context())
-		})
+		return buildLoginFinalTaskResponse(ctx, <-trc)
+	})
 }
 
-func createLogOut() http.Handler {
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
+func registerUpdatePassword(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID:  "password-update",
+		Method:       http.MethodPost,
+		Path:         "/v1/password/update",
+		Summary:      "Update user password",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, withAuthTokenContextMiddleware},
+	}, func(ctx context.Context, input *UpdatePasswordInput) (*GenericTaskResponseOutput, error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			var token string
+		trc, taskErr := createUpdatePasswordTask(ctx, input.Body.CurrentPassword, input.Body.NewPassword)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
 
-			if r.ContentLength > 0 {
-				value, ok := decodeAndProcessValidationErrors[logOutRequest](w, r)
-				if ok {
-					token = value.Token
-				} else {
-					return
-				}
-			}
-
-			trc, err := createLogOutTask(r.Context(), token)
-
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			processTaskResponse(w, <-trc, r.Context())
-		})
+		return buildTaskResponse(ctx, <-trc)
+	})
 }
 
-func createSatisfyPasswordUpdateRequest() http.Handler {
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
+func registerGetMFAStatus(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID:  "mfa-status",
+		Method:       http.MethodGet,
+		Path:         "/v1/mfa/status",
+		Summary:      "Get MFA configuration status",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, withAuthTokenContextMiddleware},
+	}, func(ctx context.Context, input *struct{}) (*TaskResponseOutput[*types.MFAStatus], error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			value, ok := decodeAndProcessValidationErrors[satisfyPasswordUpdateRequest](w, r)
-			if !ok {
-				return
-			}
+		trc, taskErr := createGetMFAStatusTask(ctx)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
 
-			trc, err := createSatisfyPasswordUpdateRequestTask(r.Context(), value.Session, value.User, value.Password, value.Attributes)
+		result := <-trc
 
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
+		taskError := result.GetError()
+		if taskError != nil {
+			logError(taskError, ctx)
+			return nil, humaTools.MapError(taskError)
+		}
 
-			taskResult := <-trc
-
-			processTaskResponse(w, taskResult, r.Context())
-		})
+		return processSideEffects(result.GetSideEffects(), &TaskResponseOutput[*types.MFAStatus]{
+			Body: result.status,
+		}), nil
+	})
 }
 
-func createUpdatePasswordRequest() http.Handler {
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
+func registerUpdateMFA(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID:  "mfa-update",
+		Method:       http.MethodPost,
+		Path:         "/v1/mfa/update",
+		Summary:      "Initiate MFA type update",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, withAuthTokenContextMiddleware},
+	}, func(ctx context.Context, input *UpdateMFAInput) (*TaskResponseOutput[*updateMFASoftwareTokenTaskResultPayload], error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			value, ok := decodeAndProcessValidationErrors[updatePasswordRequest](w, r)
-			if !ok {
-				return
-			}
-			trc, err := createUpdatePasswordTask(r.Context(), value.CurrentPassword, value.NewPassword)
+		trc, taskErr := createUpdateMFASoftwareTokenTask(ctx, input.Body.MFAType)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
 
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
+		result := <-trc
 
-			taskResult := <-trc
+		taskError := result.GetError()
+		if taskError != nil {
+			logError(taskError, ctx)
+			return nil, humaTools.MapError(taskError)
+		}
 
-			processTaskResponse(w, taskResult, r.Context())
-		})
+		return processSideEffects(result.GetSideEffects(), &TaskResponseOutput[*updateMFASoftwareTokenTaskResultPayload]{
+			Body: result.payload,
+		}), nil
+	})
 }
 
-func createGetMFAStatus() http.Handler {
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
+func registerVerifyUpdateMFA(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID:  "mfa-update-verify",
+		Method:       http.MethodPost,
+		Path:         "/v1/mfa/update/verify",
+		Summary:      "Verify TOTP code for MFA update",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, withAuthTokenContextMiddleware},
+	}, func(ctx context.Context, input *VerifyMFAUpdateInput) (*GenericTaskResponseOutput, error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			trc, err := createGetMFAStatusTask(r.Context())
+		trc, taskErr := createVerifyMFAUpdateTask(ctx, input.Body.Code)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
 
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			taskResult := <-trc
-
-			processTaskResponse(w, taskResult, r.Context())
-		})
+		return buildTaskResponse(ctx, <-trc)
+	})
 }
 
-func createUpdateMFA() http.Handler {
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
-
-			value, ok := decodeAndProcessValidationErrors[updateMFARequest](w, r)
-			if !ok {
-				return
-			}
-			trc, err := createUpdateMFASoftwareTokenTask(r.Context(), newSessionKey(), value.MFAType)
-
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			taskResult := <-trc
-
-			processTaskResponse(w, taskResult, r.Context())
-		})
-}
-
-func createVerifyUpdateMFA() http.Handler {
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
-
-			value, ok := decodeAndProcessValidationErrors[verifyMFAUpdateRequest](w, r)
-			if !ok {
-				return
-			}
-			trc, err := createVerifyMFAUpdateTask(r.Context(), value.Session, value.Code)
-
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			taskResult := <-trc
-
-			processTaskResponse(w, taskResult, r.Context())
-		})
-}
-
-func createSelectMFA() http.Handler {
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
-
-			value, ok := decodeAndProcessValidationErrors[selectMFARequest](w, r)
-			if !ok {
-				return
-			}
-			trc, err := createSelectMFATask(r.Context(), value.Session, value.User, value.MFAType)
-
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			taskResult := <-trc
-
-			processTaskResponse(w, taskResult, r.Context())
-		})
-}
-
-func createInitiatePasswordResetRequest() http.Handler {
+func registerInitiatePasswordReset(api huma.API) {
 	emailLimiter := ratelimiter.NewLimiter("createInitiatePasswordResetRequestEmail", 1, 5*time.Minute)
 
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
+	huma.Register(api, huma.Operation{
+		OperationID:  "password-reset-request",
+		Method:       http.MethodPost,
+		Path:         "/v1/password/reset/request",
+		Summary:      "Initiate password reset",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware},
+	}, func(ctx context.Context, input *InitiatePasswordResetInput) (*GenericTaskResponseOutput, error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			value, ok := decodeAndProcessValidationErrors[initiatePasswordResetRequest](w, r)
-			if !ok {
-				return
-			}
+		if err := checkLimiter(emailLimiter, input.Body.Email, ctx); err != nil {
+			return nil, err
+		}
 
-			if !processLimiter(emailLimiter, value.Email, w, r.Context()).allowed {
-				return
-			}
+		trc, taskErr := createInitiatePasswordResetTask(ctx, input.Body.Email)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
 
-			trc, err := createInitiatePasswordResetTask(r.Context(), value.Email)
-
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			taskResult := <-trc
-
-			processTaskResponse(w, taskResult, r.Context())
-		})
+		return buildTaskResponse(ctx, <-trc)
+	})
 }
 
-func createResetPasswordRequest() http.Handler {
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
+func registerResetPassword(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID:  "password-reset",
+		Method:       http.MethodGet,
+		Path:         "/v1/password/reset",
+		Summary:      "Validate password reset token and redirect",
+		MaxBodyBytes: 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware},
+	}, func(ctx context.Context, input *PasswordResetInput) (*struct{}, error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			token := passwordResetToken(r.URL.Query().Get("token"))
+		trc, taskErr := createResetPasswordTask(ctx, input.Token)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
 
-			if issues := token.Validate(); len(issues) > 0 {
-				logTransportError(httpTools.WriteBadRequest(w, types.NewValidationError(issues)), r.Context())
-				return
-			}
+		taskResult := <-trc
+		if taskResult.Err != nil {
+			logError(taskResult.Err, ctx)
+			return nil, humaTools.MapError(taskResult.Err)
+		}
 
-			trc, err := createResetPasswordTask(r.Context(), string(token))
+		hc, ok := ctx.Value(humaTools.HumaContextKey).(huma.Context)
+		if ok {
+			hc.SetHeader("Location", taskResult.redirectTo)
+			hc.SetStatus(http.StatusFound)
+		}
 
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			taskResult := <-trc
-			if processTaskError(w, taskResult, r.Context()).hadError {
-				return
-			}
-
-			w.Header().Add("Location", taskResult.Payload.(string))
-			w.WriteHeader(http.StatusFound)
-		})
+		return nil, nil
+	})
 }
 
-func createFinalizePasswordResetRequest() http.Handler {
+func registerFinalizePasswordReset(api huma.API) {
 	userLimiter := ratelimiter.NewLimiter("createFinalizePasswordResetRequestUser", 5, time.Second)
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
 
-			value, ok := decodeAndProcessValidationErrors[finalizePasswordResetRequest](w, r)
-			if !ok {
-				return
-			}
+	huma.Register(api, huma.Operation{
+		OperationID:  "password-reset-finalize",
+		Method:       http.MethodPost,
+		Path:         "/v1/password/reset/finalize",
+		Summary:      "Finalize password reset",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware},
+	}, func(ctx context.Context, input *FinalizePasswordResetInput) (*GenericTaskResponseOutput, error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			if !processLimiter(userLimiter, value.User, w, r.Context()).allowed {
-				return
-			}
+		if err := checkLimiter(userLimiter, input.Body.Token, ctx); err != nil {
+			return nil, err
+		}
 
-			trc, err := createFinalizePasswordResetTask(r.Context(), value.User, value.Code, value.Password)
+		trc, taskErr := createFinalizePasswordResetTask(ctx, input.Body.Token, input.Body.Code, input.Body.Password)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
 
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			taskResult := <-trc
-
-			processTaskResponse(w, taskResult, r.Context())
-		})
+		return buildTaskResponse(ctx, <-trc)
+	})
 }
 
-func createUnmaskToken(getParams func(r *http.Request) (string, types.GenericError)) http.Handler {
+func registerUnmaskTokenGet(api huma.API) {
 	tokenLimiter := ratelimiter.NewLimiter("unmaskToken", 100, time.Second)
 
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
+	huma.Register(api, huma.Operation{
+		OperationID:  "unmask-get",
+		Method:       http.MethodGet,
+		Path:         "/v1/unmask",
+		Summary:      "Unmask token from cookie",
+		MaxBodyBytes: 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, withAuthTokenContextMiddleware},
+	}, func(ctx context.Context, input *struct{}) (*GenericTaskResponseOutput, error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			r = attachLoggerContextToRequest(r)
-
-			token, err := getParams(r)
-
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			if !processLimiter(tokenLimiter, token, w, r.Context()).allowed {
-				return
-			}
-
-			trc, err := createUnmaskTokenTask(r.Context(), token)
-
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			processTaskResponse(w, <-trc, r.Context())
-		})
-}
-
-func createUnmaskTokenGet() http.Handler {
-	return createUnmaskToken(func(r *http.Request) (string, types.GenericError) {
-		c := httpTools.ReadFirstNamedCookie(r, config.GetMasqueradedCookieName())
-
-		if c == nil || c.Value == "" {
-			return "", types.UnauthorizedError
+		hc, ok := ctx.Value(humaTools.HumaContextKey).(huma.Context)
+		if !ok {
+			return nil, humaTools.MapError(types.NewInternalError("huma context not found", nil))
 		}
 
-		return c.Value, nil
+		token := readCookieFromHumaContext(hc, config.GetMasqueradedCookieName())
+		if token == "" {
+			logError(types.UnauthorizedError, ctx)
+			return nil, humaTools.MapError(types.UnauthorizedError)
+		}
+
+		if err := checkLimiter(tokenLimiter, token, ctx); err != nil {
+			return nil, err
+		}
+
+		trc, taskErr := createUnmaskTokenTask(ctx, token)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
+
+		return buildTaskResponse(ctx, <-trc)
 	})
 }
 
-func createUnmaskTokenPost() http.Handler {
-	return createUnmaskToken(func(r *http.Request) (string, types.GenericError) {
-		value, err := decodeAndValidate[unmaskTokenRequest](r)
+func registerUnmaskTokenPost(api huma.API) {
+	tokenLimiter := ratelimiter.NewLimiter("unmaskTokenPost", 100, time.Second)
 
-		if err != nil {
-			return "", decodingErrorToRequestResponse(err)
+	huma.Register(api, huma.Operation{
+		OperationID:  "unmask-post",
+		Method:       http.MethodPost,
+		Path:         "/v1/unmask",
+		Summary:      "Unmask token from request body",
+		MaxBodyBytes: 10 * 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware},
+	}, func(ctx context.Context, input *UnmaskTokenInput) (*GenericTaskResponseOutput, error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+
+		if err := checkLimiter(tokenLimiter, input.Body.Token, ctx); err != nil {
+			return nil, err
 		}
 
-		return value.Token, nil
+		trc, taskErr := createUnmaskTokenTask(ctx, input.Body.Token)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
+
+		return buildTaskResponse(ctx, <-trc)
 	})
 }
 
-func createGetProfileRequest() http.Handler {
+func registerGetProfile(api huma.API) {
 	tokenLimiter := ratelimiter.NewLimiter("createProfileRequest", 6000, time.Minute)
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			r, cancel := attachDeadline(r)
-			defer cancel()
 
-			token := getAuthTokenFromContext(r.Context())
+	huma.Register(api, huma.Operation{
+		OperationID:  "profile",
+		Method:       http.MethodGet,
+		Path:         "/v1/profile",
+		Summary:      "Get user profile",
+		MaxBodyBytes: 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, withAuthTokenContextMiddleware, withIdTokenContextMiddleware},
+	}, func(ctx context.Context, input *struct{}) (*TaskResponseOutput[*UserIdTokenProfile], error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
 
-			if token == "" {
-				processError(w, types.UnauthorizedError, r.Context())
-				return
-			}
-
-			if !processLimiter(tokenLimiter, token, w, r.Context()).allowed {
-				return
-			}
-
-			trc, err := createGetProfileTask(r.Context())
-
-			if processError(w, err, r.Context()).hadError {
-				return
-			}
-
-			taskResult := <-trc
-
-			processTaskResponse(w, taskResult, r.Context())
-		})
-}
-
-func withRequestLogger(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r = attachLoggerContextToRequest(r)
-		next.ServeHTTP(w, r)
-	})
-}
-
-func withDefaultRequestSizeLimit(next http.Handler) http.Handler {
-	return httpTools.MaxRequestSizeLimiterMiddleware(next, 10*1024)
-}
-
-func withDefaultMiddleware(next http.Handler) http.Handler {
-	return withRequestLogger(withDefaultRequestSizeLimit(next))
-}
-
-func withAuthAndDefaultMiddleware(next http.Handler) http.Handler {
-	return withRequestLogger(withDefaultRequestSizeLimit(withAuthTokenContext(next)))
-}
-
-func withAuthTokenContext(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var ctx = r.Context()
-		if config.UseCookies() {
-			if config.UseMasquerade() {
-				c := httpTools.ReadFirstNamedCookie(r, config.GetMasqueradedCookieName())
-				if c != nil && c.Value != "" {
-					ctx = context.WithValue(ctx, AuthContextVarName, MasqueradedAuth{Token: c.Value})
-				}
-			} else {
-				c := httpTools.ReadFirstNamedCookie(r, config.GetAccessTokenCookieName())
-				if c != nil && c.Value != "" {
-					ctx = context.WithValue(ctx, AuthContextVarName, TokenAuth{Token: c.Value})
-				}
-			}
-		} else {
-			auth := r.Header.Get("Authorization")
-			if strings.HasPrefix(auth, "Bearer ") {
-				ctx = context.WithValue(ctx, AuthContextVarName, TokenAuth{Token: strings.TrimPrefix(auth, "Bearer ")})
-			}
+		token := getAuthTokenFromContext(ctx)
+		if token == "" {
+			logError(types.UnauthorizedError, ctx)
+			return nil, humaTools.MapError(types.UnauthorizedError)
 		}
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
 
-func withIdTokenContext(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var ctx = r.Context()
-		if config.UseCookies() {
-			if !config.UseMasquerade() {
-				c := httpTools.ReadFirstNamedCookie(r, config.GetIDTokenCookieName())
-				if c != nil && c.Value != "" {
-					ctx = context.WithValue(ctx, IdTokenContextVarName, c.Value)
-				}
-			}
+		if err := checkLimiter(tokenLimiter, token, ctx); err != nil {
+			return nil, err
 		}
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
 
-func withRefreshTokenContext(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var ctx = r.Context()
-		if config.UseCookies() {
-			if !config.UseMasquerade() {
-				c := httpTools.ReadFirstNamedCookie(r, config.GetRefreshTokenCookieName())
-				if c != nil && c.Value != "" {
-					ctx = context.WithValue(ctx, RefreshTokenContextVarName, c.Value)
-				}
-			}
+		trc, taskErr := createGetProfileTask(ctx)
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
 		}
-		next.ServeHTTP(w, r.WithContext(ctx))
+
+		result := <-trc
+
+		taskError := result.GetError()
+		if taskError != nil {
+			logError(taskError, ctx)
+			return nil, humaTools.MapError(taskError)
+		}
+
+		return processSideEffects(result.GetSideEffects(), &TaskResponseOutput[*UserIdTokenProfile]{
+			Body: result.Profile,
+		}), nil
 	})
 }
 
-func appendMiddleware(handler http.Handler, middleware ...func(next http.Handler) http.Handler) http.Handler {
-	if len(middleware) == 0 {
-		return handler
-	}
+// ---------------------------------------------------------------------------
+// Route registration
+// ---------------------------------------------------------------------------
 
-	for i := 0; i < len(middleware); i++ {
-		handler = middleware[i](handler)
-	}
-	return handler
-}
+func AddRoutes(api huma.API) {
+	registerSharedSchemas(api)
 
-func AddRoutes(mux *http.ServeMux) *http.ServeMux {
-	mux.Handle("POST /v1/login", withDefaultMiddleware(createLogin()))
-	mux.Handle("POST /v1/login/password/update", withDefaultMiddleware(createSatisfyPasswordUpdateRequest()))
-	mux.Handle("POST /v1/login/mfa/select", withDefaultMiddleware(createSelectMFA()))
-	mux.Handle("POST /v1/login/mfa/setup", withDefaultMiddleware(createMFASetup()))
-	mux.Handle("POST /v1/login/mfa/setup/verify", withDefaultMiddleware(createMFASetupVerifySoftwareToken()))
-	mux.Handle("POST /v1/login/mfa/verify", withDefaultMiddleware(createMFAVerify()))
-	mux.Handle("POST /v1/logout", withAuthAndDefaultMiddleware(withRefreshTokenContext(createLogOut())))
-	mux.Handle("POST /v1/password/update", withAuthAndDefaultMiddleware(createUpdatePasswordRequest()))
-	mux.Handle("POST /v1/mfa/status", withAuthAndDefaultMiddleware(createGetMFAStatus()))
-	mux.Handle("POST /v1/mfa/update", withAuthAndDefaultMiddleware(createUpdateMFA()))
-	mux.Handle("POST /v1/mfa/update/verify", withAuthAndDefaultMiddleware(createVerifyUpdateMFA()))
+	registerLogin(api)
+	registerSatisfyPasswordUpdate(api)
+	registerSelectMFA(api)
+	registerMFASetup(api)
+	registerMFASetupVerifySoftwareToken(api)
+	registerMFAVerify(api)
+	registerLogout(api)
+	registerUpdatePassword(api)
+	registerGetMFAStatus(api)
+	registerUpdateMFA(api)
+	registerVerifyUpdateMFA(api)
 
 	if passwordreset.GetSettings().Enabled {
-		mux.Handle("GET /v1/password/reset", withDefaultMiddleware(createResetPasswordRequest()))
-		mux.Handle("POST /v1/password/reset/request", withDefaultMiddleware(createInitiatePasswordResetRequest()))
-		mux.Handle("POST /v1/password/reset/finalize", withDefaultMiddleware(createFinalizePasswordResetRequest()))
+		registerResetPassword(api)
+		registerInitiatePasswordReset(api)
+		registerFinalizePasswordReset(api)
 	}
 
 	if !config.UseMasquerade() {
-		mux.Handle("POST /v1/refresh", appendMiddleware(createRefreshToken(), withRefreshTokenContext, withIdTokenContext, withDefaultMiddleware))
+		registerRefreshToken(api)
 	}
 
 	if config.UseCookies() {
 		if config.UseMasquerade() {
-			mux.Handle("GET /v1/unmask", withAuthAndDefaultMiddleware(createUnmaskTokenGet()))
+			registerUnmaskTokenGet(api)
 		}
-		mux.Handle("GET /v1/profile", withAuthAndDefaultMiddleware(withIdTokenContext(createGetProfileRequest())))
 	} else {
 		if config.UseMasquerade() {
-			mux.Handle("POST /v1/unmask", withDefaultMiddleware(createUnmaskTokenPost()))
+			registerUnmaskTokenPost(api)
 		}
 	}
 
-	return mux
+	registerGetProfile(api)
+
+	registerValidate(api)
 }

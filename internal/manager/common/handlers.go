@@ -1,33 +1,24 @@
 package common
 
 import (
+	"context"
 	"net/http"
-	"proxylogin/internal/manager/logging"
-	httpTools "proxylogin/internal/manager/tools/http"
-	"proxylogin/internal/manager/tools/json"
 
-	"go.uber.org/zap"
+	"github.com/danielgtaylor/huma/v2"
 )
 
-var commonLogger *zap.Logger
-
-func getLogger() *zap.Logger {
-	if commonLogger == nil {
-		commonLogger = logging.NewLogger("commonHandlers")
-	}
-	return commonLogger
+type HealthOutput struct {
+	Body struct{}
 }
 
-func createHealth() http.Handler {
-	return http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			if err := json.EncodeJSON(w, http.StatusOK, map[string]string{}); err != nil {
-				getLogger().Error("transport error", zap.String("requestName", "health"), zap.Error(err))
-			}
-		})
-}
-
-func AddRoutes(mux *http.ServeMux) *http.ServeMux {
-	mux.Handle("GET /v1/health", httpTools.MaxRequestSizeLimiterMiddleware(createHealth(), 1024))
-	return mux
+func AddRoutes(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID:  "health",
+		Method:       http.MethodGet,
+		Path:         "/v1/health",
+		Summary:      "Health check",
+		MaxBodyBytes: 1024,
+	}, func(ctx context.Context, input *struct{}) (*HealthOutput, error) {
+		return &HealthOutput{}, nil
+	})
 }

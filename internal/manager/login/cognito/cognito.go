@@ -30,6 +30,8 @@ var (
 	sesClient                *ses.Client
 	poolClientDescription    *types.UserPoolClientType
 	poolDescription          *types.UserPoolType
+	userPoolMFAConfig        *cognitoidentityprovider.GetUserPoolMfaConfigOutput
+	enforceMFA               bool
 	stopWorkers              func()
 )
 
@@ -48,6 +50,10 @@ func getLogger() *zap.Logger {
 	return cognitoLogger
 }
 
+func init() {
+	viper.SetDefault("cognito.enforceMFA", false)
+}
+
 func loadSettings() error {
 
 	cognitoClientID = viper.GetString("cognito.clientId")
@@ -55,6 +61,7 @@ func loadSettings() error {
 	cognitoUserPoolID = viper.GetString("cognito.userPoolId")
 	cognitoJWKSIssuer = viper.GetString("cognito.jwksIssuer")
 	cognitoJWKSKeySigningURL = viper.GetString("cognito.jwksSigningKeyURL")
+	enforceMFA = viper.GetBool("cognito.enforceMFA")
 
 	err := validateSettings()
 	if err != nil {
@@ -63,6 +70,8 @@ func loadSettings() error {
 
 	poolClientDescription = describeUserPoolClient(cognitoClient, cognitoUserPoolID, cognitoClientID)
 	poolDescription = describeUserPool(cognitoClient, cognitoUserPoolID)
+
+	userPoolMFAConfig = getUserPoolMfaConfig(cognitoClient, cognitoUserPoolID)
 
 	useAuthToRefresh = poolClientDescription.EnableTokenRevocation != nil && *poolClientDescription.EnableTokenRevocation
 
@@ -131,6 +140,20 @@ func describeUserPool(client *cognitoidentityprovider.Client, userPoolId string)
 	}
 
 	return result.UserPool
+}
+
+func getUserPoolMfaConfig(client *cognitoidentityprovider.Client, userPoolId string) *cognitoidentityprovider.GetUserPoolMfaConfigOutput {
+	input := &cognitoidentityprovider.GetUserPoolMfaConfigInput{
+		UserPoolId: aws.String(userPoolId),
+	}
+
+	result, err := client.GetUserPoolMfaConfig(context.Background(), input)
+
+	if err != nil {
+		getLogger().Fatal("Failed to describe user pool", zap.Error(err))
+	}
+
+	return result
 }
 
 func Start() error {

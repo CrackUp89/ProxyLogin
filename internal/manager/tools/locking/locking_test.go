@@ -2,7 +2,7 @@ package locking
 
 import (
 	"context"
-	"proxylogin/internal/manager/rds"
+	"proxylogin/internal/manager/redisclient"
 	"proxylogin/internal/manager/tools"
 	"sync"
 	"sync/atomic"
@@ -114,7 +114,7 @@ func TestLocalReturnOnce_Do(t *testing.T) {
 
 func TestRedisReturnOnce_Do(t *testing.T) {
 	viper.SetDefault("redis.url", "redis://localhost:6389/0?protocol=3")
-	rds.LoadConfig()
+	redisclient.LoadConfig()
 
 	t.Run("success", func(t *testing.T) {
 		once := getRedisReturnOnce[string]("test", 10*time.Second)

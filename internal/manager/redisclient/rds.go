@@ -1,4 +1,4 @@
-package rds
+package redisclient
 
 import (
 	"strings"

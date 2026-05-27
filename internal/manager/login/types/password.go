@@ -18,4 +18,4 @@ func (s *resetPasswordSessionExpiredOrDoesNotExistError) Type() ErrorType {
 	return BadDataErrorType
 }
 
-var ResetPasswordSessionExpiredOrDoesNotExistError = resetPasswordSessionExpiredOrDoesNotExistError{}
+var ResetPasswordSessionExpiredOrDoesNotExistError = &resetPasswordSessionExpiredOrDoesNotExistError{}

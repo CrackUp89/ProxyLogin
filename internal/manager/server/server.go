@@ -13,11 +13,14 @@ import (
 	"proxylogin/internal/manager/login/masquerade"
 	"proxylogin/internal/manager/login/passwordreset"
 	"proxylogin/internal/manager/ratelimiter"
-	"proxylogin/internal/manager/rds"
+	"proxylogin/internal/manager/redisclient"
 	httpTools "proxylogin/internal/manager/tools/http"
+	humaTools "proxylogin/internal/manager/tools/huma"
 	"syscall"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
@@ -54,7 +57,7 @@ func Run() error {
 	logger := getLogger()
 
 	config.LoadConfig()
-	rds.LoadConfig()
+	redisclient.LoadConfig()
 	ratelimiter.LoadConfig()
 	masquerade.LoadConfig()
 	httpTools.LoadConfig()
@@ -62,7 +65,13 @@ func Run() error {
 
 	mux := http.NewServeMux()
 
-	common.AddRoutes(mux)
+	humaConfig := huma.DefaultConfig("ProxyLogin API", "1.0.0")
+	api := humago.New(mux, humaConfig)
+
+	// Global huma middleware: store huma.Context in context.Context for cookie access
+	api.UseMiddleware(humaTools.HumaContextMiddleware)
+
+	common.AddRoutes(api)
 
 	var err error
 	err = cognito.Start()
@@ -70,7 +79,7 @@ func Run() error {
 		return err
 	}
 
-	cognito.AddRoutes(mux)
+	cognito.AddRoutes(api)
 
 	var handler http.Handler
 	handler = mux
@@ -82,19 +91,6 @@ func Run() error {
 	}
 
 	handler = httpTools.WithRequestMetadataContextMiddleware(handler)
-
-	//rt := tools.RequestTracker{}
-	//handler = rt.RequestTrackerMiddleware(handler)
-	//
-	//go func() {
-	//	for {
-	//		activeRequests := rt.GetActiveRequests()
-	//		for _, req := range activeRequests {
-	//			fmt.Println(req.Path)
-	//		}
-	//		time.Sleep(1 * time.Second)
-	//	}
-	//}()
 
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf("%s:%s", viper.GetString("http.address"), viper.GetString("http.port")),

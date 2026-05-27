@@ -6,7 +6,7 @@ import (
 	"errors"
 	"proxylogin/internal/manager/config"
 	"proxylogin/internal/manager/login/types"
-	"proxylogin/internal/manager/rds"
+	"proxylogin/internal/manager/redisclient"
 	"sync"
 	"time"
 
@@ -121,11 +121,11 @@ type RedisMasqueradeStorage struct {
 }
 
 func (r RedisMasqueradeStorage) buildKey(key string) string {
-	return rds.BuildKey("tokenMasquerade:keys:", key)
+	return redisclient.BuildKey("tokenMasquerade:keys:", key)
 }
 
 func (r RedisMasqueradeStorage) HasMasqueradedRecord(ctx context.Context, key string) (bool, error) {
-	if c, err := rds.GetClient().Exists(ctx, r.buildKey(key)).Result(); err != nil {
+	if c, err := redisclient.GetClient().Exists(ctx, r.buildKey(key)).Result(); err != nil {
 		getMasqueradeLogger().Error("failed search for token", zap.Error(err))
 		return false, err
 	} else {
@@ -145,7 +145,7 @@ func (r RedisMasqueradeStorage) StoreMasqueradedRecord(ctx context.Context, key 
 		ttl = time.Until(expires)
 	}
 
-	if err = rds.GetClient().Set(ctx, r.buildKey(key), data, ttl).Err(); err != nil {
+	if err = redisclient.GetClient().Set(ctx, r.buildKey(key), data, ttl).Err(); err != nil {
 		getMasqueradeLogger().Error("failed to store token", zap.Error(err))
 		return err
 	}
@@ -158,7 +158,7 @@ func (r RedisMasqueradeStorage) StoreMasqueradedRecord(ctx context.Context, key 
 }
 
 func (r RedisMasqueradeStorage) GetMasqueradedRecord(ctx context.Context, key string) (*MasqueradedRecord, error) {
-	data, err := rds.GetClient().Get(ctx, r.buildKey(key)).Result()
+	data, err := redisclient.GetClient().Get(ctx, r.buildKey(key)).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, nil
@@ -179,7 +179,7 @@ func (r RedisMasqueradeStorage) GetMasqueradedRecord(ctx context.Context, key st
 }
 
 func (r RedisMasqueradeStorage) DropMasqueradedRecord(ctx context.Context, key string) error {
-	if err := rds.GetClient().Del(ctx, r.buildKey(key)).Err(); err != nil {
+	if err := redisclient.GetClient().Del(ctx, r.buildKey(key)).Err(); err != nil {
 		getMasqueradeLogger().Error("failed to delete token from redis",
 			zap.String("key", key),
 			zap.Error(err))
