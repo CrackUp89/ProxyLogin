@@ -769,15 +769,7 @@ func createFinalizePasswordResetTask(ctx context.Context, token string, code str
 
 type unmaskTokenTaskResult struct {
 	withResultBase
-	withAuthResults
-}
-
-func (u *unmaskTokenTaskResult) GetPayload() interface{} {
-	return u.authResults
-}
-
-func (u *unmaskTokenTaskResult) SetPayload(_ interface{}) {
-	panic("should not be called")
+	tokenSet *types.AuthTokenSet
 }
 
 type unmaskTokenTaskResultChan chan *unmaskTokenTaskResult

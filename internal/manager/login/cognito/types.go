@@ -398,12 +398,32 @@ type FinalizePasswordResetInput struct {
 	Body finalizePasswordResetRequest
 }
 
-type unmaskTokenRequest struct {
-	Token string `json:"token" minLength:"1" doc:"Masqueraded token to unmask"`
+type UnmaskTokenInputGet struct {
+	Remember bool `json:"remember" default:"false" doc:"If cookies are enabled - sets cookies expiration date" query:"remember"`
 }
 
-type UnmaskTokenInput struct {
-	Body unmaskTokenRequest
+func (t UnmaskTokenInputGet) TransformSchema(r huma.Registry, s *huma.Schema) *huma.Schema {
+	return s
+}
+
+type unmaskTokenInputBody struct {
+	Token    string `json:"token" minLength:"1" doc:"Masqueraded token to unmask"`
+	Remember bool   `json:"remember" default:"false" required:"false" doc:"If cookies are enabled - sets cookies expiration date"`
+}
+
+type UnmaskTokenInputPost struct {
+	Body unmaskTokenInputBody
+}
+
+type UnmaskTokenResultBody struct {
+	AccessToken  string `json:"access_token,omitempty" doc:"Access token"`
+	IdToken      string `json:"id_token,omitempty" doc:"Id token"`
+	RefreshToken string `json:"refresh_token,omitempty" doc:"Refresh token. Only present if token refresh is enabled and unmask refresh token is enabled"`
+}
+
+type UnmaskTokenResult struct {
+	Body      UnmaskTokenResultBody `doc:"If cookies are disabled - contains authentication token set"`
+	SetCookie []http.Cookie         `header:"Set-Cookie"`
 }
 
 // WithValidation is kept for backward compat but no longer used by handlers.

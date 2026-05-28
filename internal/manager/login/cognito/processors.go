@@ -1879,8 +1879,14 @@ func processUnmaskTokenTask(task unmaskTokenTask) *unmaskTokenTaskResult {
 	requestLogger.Log(processingLogLevel, "processing")
 
 	r, err := unmaskToken(task.Context, task.Token, requestLogger, true, masquerade.UnmaskRefreshToken())
-	//todo: add option to remember unmasked token
-	return handleAuthPayload(r, false, err, genericAuthResultFactory[unmaskTokenTaskResult], genericAuthErrorFactory[unmaskTokenTaskResult])
+
+	if err != nil {
+		return genericTaskErrorFactory[unmaskTokenTaskResult](err)
+	}
+
+	return &unmaskTokenTaskResult{
+		tokenSet: r,
+	}
 }
 
 func cognitoIdTokenToProfile(token string) (*UserIdTokenProfile, error) {

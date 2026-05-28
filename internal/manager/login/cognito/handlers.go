@@ -210,6 +210,77 @@ func logError(err types.GenericError, ctx context.Context) {
 	}
 }
 
+func buildMasqueradedTokenAuthResponse(p *types.MasqueradedToken, remember bool) *TaskResponseOutput[*AuthTaskResponse] {
+	var expires time.Time
+	if remember {
+		expires = p.TokenExpires
+	} else {
+		expires = time.Time{}
+	}
+
+	if config.UseCookies() {
+		return &TaskResponseOutput[*AuthTaskResponse]{
+			Body: &AuthTaskResponse{
+				AuthResult: newLoginResponseMasquerade(nil),
+			},
+			SetCookie: []http.Cookie{
+				createCookie(config.GetMasqueradedCookieName(), p.Token, expires),
+			},
+		}
+	}
+
+	return &TaskResponseOutput[*AuthTaskResponse]{
+		Body: &AuthTaskResponse{
+			AuthResult: newLoginResponseMasquerade(p),
+		},
+	}
+}
+
+func buildAuthTokenSetCookies(p *types.AuthTokenSet, remember bool) []http.Cookie {
+	responseCookies := make([]http.Cookie, 0, 3)
+
+	if p.RefreshToken != "" {
+		var refreshExpires time.Time
+		if remember {
+			refreshExpires = p.RefreshTokenExpires
+		} else {
+			refreshExpires = time.Time{}
+		}
+		responseCookies = append(responseCookies, createCookie(config.GetRefreshTokenCookieName(), p.RefreshToken, refreshExpires))
+	}
+
+	var accessExpires time.Time
+	var idExpires time.Time
+	if remember {
+		accessExpires = p.AccessTokenExpires
+		idExpires = p.IdTokenExpires
+	} else {
+		accessExpires = time.Time{}
+		idExpires = time.Time{}
+	}
+
+	responseCookies = append(responseCookies,
+		createCookie(config.GetAccessTokenCookieName(), p.AccessToken, accessExpires),
+		createCookie(config.GetIDTokenCookieName(), p.IdToken, idExpires))
+
+	return responseCookies
+}
+
+func buildTokenSetAuthResponse(p *types.AuthTokenSet, remember bool) *TaskResponseOutput[*AuthTaskResponse] {
+	if config.UseCookies() {
+		return &TaskResponseOutput[*AuthTaskResponse]{
+			Body: &AuthTaskResponse{
+				AuthResult: newLoginResponseTokenSet(nil),
+			},
+			SetCookie: buildAuthTokenSetCookies(p, remember),
+		}
+	}
+
+	return &TaskResponseOutput[*AuthTaskResponse]{Body: &AuthTaskResponse{
+		AuthResult: newLoginResponseTokenSet(p),
+	}}
+}
+
 func buildAuthResponse(_ context.Context, taskResult interface {
 	WithGenericError
 	WithAuthResults
@@ -230,70 +301,11 @@ func buildAuthResponse(_ context.Context, taskResult interface {
 
 	remember := taskAuthResults.GetRemember()
 	if p, ok := taskAuthResultsData.(*types.MasqueradedToken); ok {
-		var expires time.Time
-		if remember {
-			expires = p.TokenExpires
-		} else {
-			expires = time.Time{}
-		}
-
-		if config.UseCookies() {
-			return &TaskResponseOutput[*AuthTaskResponse]{
-				Body: &AuthTaskResponse{
-					AuthResult: newLoginResponseMasquerade(nil),
-				},
-				SetCookie: []http.Cookie{
-					createCookie(config.GetMasqueradedCookieName(), p.Token, expires),
-				},
-			}
-		}
-
-		return &TaskResponseOutput[*AuthTaskResponse]{
-			Body: &AuthTaskResponse{
-				AuthResult: newLoginResponseMasquerade(p),
-			},
-		}
+		return buildMasqueradedTokenAuthResponse(p, remember)
 	}
 
 	if p, ok := taskAuthResultsData.(*types.AuthTokenSet); ok {
-		if config.UseCookies() {
-			responseCookies := make([]http.Cookie, 0, 3)
-
-			if p.RefreshToken != "" {
-				var refreshExpires time.Time
-				if remember {
-					refreshExpires = p.RefreshTokenExpires
-				} else {
-					refreshExpires = time.Time{}
-				}
-				responseCookies = append(responseCookies, createCookie(config.GetRefreshTokenCookieName(), p.RefreshToken, refreshExpires))
-			}
-
-			var accessExpires time.Time
-			var idExpires time.Time
-			if remember {
-				accessExpires = p.AccessTokenExpires
-				idExpires = p.IdTokenExpires
-			} else {
-				accessExpires = time.Time{}
-				idExpires = time.Time{}
-			}
-
-			responseCookies = append(responseCookies,
-				createCookie(config.GetAccessTokenCookieName(), p.AccessToken, accessExpires),
-				createCookie(config.GetIDTokenCookieName(), p.IdToken, idExpires))
-
-			return &TaskResponseOutput[*AuthTaskResponse]{
-				Body: &AuthTaskResponse{
-					AuthResult: newLoginResponseTokenSet(nil),
-				},
-				SetCookie: responseCookies,
-			}
-		}
-
-		return &TaskResponseOutput[*AuthTaskResponse]{Body: &AuthTaskResponse{
-			AuthResult: newLoginResponseTokenSet(p),
-		}}
+		return buildTokenSetAuthResponse(p, remember)
 	}
 	getHandlersLogger().Error("unknown auth payload type", zap.String("dataType", reflect.TypeOf(taskAuthResultsData).Name()))
 	return nil
@@ -937,6 +949,46 @@ func registerFinalizePasswordReset(api huma.API) {
 	})
 }
 
+func unmaskTokenResult(ctx context.Context, tokenLimiter ratelimiter.Limiter, token string, remember bool) (*UnmaskTokenResult, error) {
+	if token == "" {
+		logError(types.UnauthorizedError, ctx)
+		return nil, humaTools.MapError(types.UnauthorizedError)
+	}
+
+	if err := checkLimiter(tokenLimiter, token, ctx); err != nil {
+		return nil, err
+	}
+
+	trc, taskErr := createUnmaskTokenTask(ctx, token)
+	if taskErr != nil {
+		logError(taskErr, ctx)
+		return nil, humaTools.MapError(taskErr)
+	}
+
+	result := <-trc
+
+	taskError := result.GetError()
+	if taskError != nil {
+		logError(taskError, ctx)
+		return nil, humaTools.MapError(taskError)
+	}
+
+	if config.UseCookies() {
+		return &UnmaskTokenResult{
+			Body:      UnmaskTokenResultBody{},
+			SetCookie: buildAuthTokenSetCookies(result.tokenSet, remember),
+		}, nil
+	}
+
+	return &UnmaskTokenResult{
+		Body: UnmaskTokenResultBody{
+			AccessToken:  result.tokenSet.AccessToken,
+			IdToken:      result.tokenSet.IdToken,
+			RefreshToken: result.tokenSet.RefreshToken,
+		},
+	}, nil
+}
+
 func registerUnmaskTokenGet(api huma.API) {
 	tokenLimiter := ratelimiter.NewLimiter("unmaskToken", 100, time.Second)
 
@@ -947,7 +999,15 @@ func registerUnmaskTokenGet(api huma.API) {
 		Summary:      "Unmask token from cookie",
 		MaxBodyBytes: 1024,
 		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, withAuthTokenContextMiddleware},
-	}, func(ctx context.Context, input *struct{}) (*GenericTaskResponseOutput, error) {
+		Parameters: []*huma.Param{
+			{
+				Name:     config.GetMasqueradedCookieName(),
+				In:       "cookie",
+				Schema:   &huma.Schema{Type: "string"},
+				Required: true,
+			},
+		},
+	}, func(ctx context.Context, input *UnmaskTokenInputGet) (*UnmaskTokenResult, error) {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 
@@ -957,22 +1017,8 @@ func registerUnmaskTokenGet(api huma.API) {
 		}
 
 		token := readCookieFromHumaContext(hc, config.GetMasqueradedCookieName())
-		if token == "" {
-			logError(types.UnauthorizedError, ctx)
-			return nil, humaTools.MapError(types.UnauthorizedError)
-		}
 
-		if err := checkLimiter(tokenLimiter, token, ctx); err != nil {
-			return nil, err
-		}
-
-		trc, taskErr := createUnmaskTokenTask(ctx, token)
-		if taskErr != nil {
-			logError(taskErr, ctx)
-			return nil, humaTools.MapError(taskErr)
-		}
-
-		return buildTaskResponse(ctx, <-trc)
+		return unmaskTokenResult(ctx, tokenLimiter, token, input.Remember)
 	})
 }
 
@@ -986,21 +1032,11 @@ func registerUnmaskTokenPost(api huma.API) {
 		Summary:      "Unmask token from request body",
 		MaxBodyBytes: 10 * 1024,
 		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware},
-	}, func(ctx context.Context, input *UnmaskTokenInput) (*GenericTaskResponseOutput, error) {
+	}, func(ctx context.Context, input *UnmaskTokenInputPost) (*UnmaskTokenResult, error) {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 
-		if err := checkLimiter(tokenLimiter, input.Body.Token, ctx); err != nil {
-			return nil, err
-		}
-
-		trc, taskErr := createUnmaskTokenTask(ctx, input.Body.Token)
-		if taskErr != nil {
-			logError(taskErr, ctx)
-			return nil, humaTools.MapError(taskErr)
-		}
-
-		return buildTaskResponse(ctx, <-trc)
+		return unmaskTokenResult(ctx, tokenLimiter, input.Body.Token, input.Body.Remember)
 	})
 }
 
@@ -1073,18 +1109,13 @@ func AddRoutes(api huma.API) {
 		registerFinalizePasswordReset(api)
 	}
 
-	if !config.UseMasquerade() {
-		registerRefreshToken(api)
-	}
-
-	if config.UseCookies() {
-		if config.UseMasquerade() {
+	if config.UseMasquerade() {
+		if config.UseCookies() {
 			registerUnmaskTokenGet(api)
 		}
+		registerUnmaskTokenPost(api)
 	} else {
-		if config.UseMasquerade() {
-			registerUnmaskTokenPost(api)
-		}
+		registerRefreshToken(api)
 	}
 
 	registerGetProfile(api)
