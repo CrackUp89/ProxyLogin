@@ -10,18 +10,15 @@ import (
 	"proxylogin/internal/manager/config"
 	"proxylogin/internal/manager/logging"
 	"proxylogin/internal/manager/login/cognito"
-	"proxylogin/internal/manager/login/masquerade"
-	"proxylogin/internal/manager/login/passwordreset"
-	"proxylogin/internal/manager/ratelimiter"
-	"proxylogin/internal/manager/redisclient"
+	"proxylogin/internal/manager/tools"
 	httpTools "proxylogin/internal/manager/tools/http"
 	humaTools "proxylogin/internal/manager/tools/huma"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
-	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
 
@@ -34,77 +31,126 @@ func getLogger() *zap.Logger {
 	return serverLogger
 }
 
-func init() {
-	viper.SetDefault("instance.id", "proxylogin")
+func newHumaConfig(cfg config.ServerConfig, version string) huma.Config {
+	schemaPrefix := "#/components/schemas/"
+	schemasPath := "/schemas"
 
-	viper.SetDefault("http.address", "")
-	viper.SetDefault("http.port", "http")
-	viper.SetDefault("http.cors.enabled", false)
-	viper.SetDefault("http.cors.allowedOrigin", "*")
-	viper.SetDefault("http.cors.allowedMethods", "GET, POST, PUT, DELETE, OPTIONS")
-	viper.SetDefault("http.cors.allowedHeaders", "Content-Type, Device-Key, Location")
-	viper.SetDefault("http.cors.allowCredentials", true)
+	registry := huma.NewMapRegistry(schemaPrefix, huma.DefaultSchemaNamer)
 
-	viper.SetDefault("http.readHeaderTimeout", 10)
-	viper.SetDefault("http.readTimeout", 30)
-	viper.SetDefault("http.writeTimeout", 60)
-	viper.SetDefault("http.idleTimeout", 120)
+	r := huma.Config{
+		OpenAPI: &huma.OpenAPI{
+			OpenAPI: "3.1.0",
+			Info: &huma.Info{
+				Title:       "ProxyLogin API",
+				Version:     version,
+				Description: apiDescription,
+			},
+			Components: &huma.Components{
+				Schemas: registry,
+			},
+		},
+
+		Formats:                      huma.DefaultFormats,
+		DefaultFormat:                "application/json",
+		NoFormatFallback:             false,
+		RejectUnknownQueryParameters: false,
+		Transformers:                 nil,
+	}
+
+	if cfg.DocsEnabled {
+		r.DocsPath = "/docs"
+		r.DocsRenderer = huma.DocsRendererStoplightElements
+	}
+
+	if cfg.OpenAPIEnabled {
+		r.OpenAPIPath = "/openapi"
+		if cfg.OpenAPISchemas {
+			r.SchemasPath = schemasPath
+			r.CreateHooks = []func(huma.Config) huma.Config{
+				func(c huma.Config) huma.Config {
+					linkTransformer := huma.NewSchemaLinkTransformer(schemaPrefix, c.SchemasPath)
+					c.OnAddOperation = append(c.OnAddOperation, linkTransformer.OnAddOperation)
+					c.Transformers = append(c.Transformers, linkTransformer.Transform)
+					return c
+				},
+			}
+		}
+	}
+
+	return r
 }
 
-func Run() error {
-	logging.LoadConfig()
+func Run(appConfig config.Config) error {
+	logging.Setup(appConfig.LoggingConfig)
 
 	logger := getLogger()
 
-	config.LoadConfig()
-	redisclient.LoadConfig()
-	ratelimiter.LoadConfig()
-	masquerade.LoadConfig()
-	httpTools.LoadConfig()
-	passwordreset.LoadConfig()
+	versionInfo := common.GetAppVersionInfo()
+	logger.Info("Starting...", zap.String("version", versionInfo.Version), zap.String("commit", versionInfo.Commit), zap.String("buildDate", versionInfo.BuildDate))
+
+	serverConfig := appConfig.ServerConfig
 
 	mux := http.NewServeMux()
 
-	humaConfig := huma.DefaultConfig("ProxyLogin API", "1.0.0")
+	humaConfig := newHumaConfig(serverConfig, versionInfo.Version)
 	api := humago.New(mux, humaConfig)
 
 	// Global huma middleware: store huma.Context in context.Context for cookie access
 	api.UseMiddleware(humaTools.HumaContextMiddleware)
 
-	common.AddRoutes(api)
+	csrf := tools.NewCSRF(serverConfig.CSRF.HeaderName, serverConfig.CSRF.AllowedOrigins)
 
-	var err error
-	err = cognito.Start()
+	commonHandlers := common.New()
+
+	commonHandlers.AddRoutes(api)
+
+	cognitoProvider, err := cognito.New(appConfig, csrf)
 	if err != nil {
 		return err
 	}
 
-	cognito.AddRoutes(api)
+	err = cognitoProvider.Start()
+	if err != nil {
+		return err
+	}
+
+	cognitoProvider.AddRoutes(api)
 
 	var handler http.Handler
 	handler = mux
 
 	handler = httpTools.WithAutoRecoverMiddleware(handler)
 
-	if viper.GetBool("http.cors.enabled") {
-		handler = withCORSMiddleware(handler)
+	if serverConfig.CORS.Enabled {
+		handler = withCORSMiddleware(corsWithCSRFHeader(serverConfig.CORS, serverConfig.CSRF.HeaderName), handler)
 	}
 
-	handler = httpTools.WithRequestMetadataContextMiddleware(handler)
+	handler = httpTools.WithRequestMetadataContextMiddleware(appConfig.HTTPToolsConfig, handler)
 
 	httpServer := &http.Server{
-		Addr:              fmt.Sprintf("%s:%s", viper.GetString("http.address"), viper.GetString("http.port")),
+		Addr:              fmt.Sprintf("%s:%s", serverConfig.Address, serverConfig.Port),
 		Handler:           handler,
-		ReadHeaderTimeout: viper.GetDuration("http.readHeaderTimeout") * time.Second,
-		ReadTimeout:       viper.GetDuration("http.readTimeout") * time.Second,
-		WriteTimeout:      viper.GetDuration("http.writeTimeout") * time.Second,
-		IdleTimeout:       viper.GetDuration("http.idleTimeout") * time.Second,
+		ReadHeaderTimeout: serverConfig.ReadHeaderTimeout,
+		ReadTimeout:       serverConfig.ReadTimeout,
+		WriteTimeout:      serverConfig.WriteTimeout,
+		IdleTimeout:       serverConfig.IdleTimeout,
 	}
 
 	serverErrors := make(chan error, 1)
 
 	go func() {
 		logger.Info(fmt.Sprintf("Listening on %s", httpServer.Addr))
+		if serverConfig.DocsEnabled {
+			logger.Warn(fmt.Sprintf("Docs available on %s/docs", httpServer.Addr))
+		}
+		if serverConfig.OpenAPIEnabled {
+			if serverConfig.OpenAPISchemas {
+				logger.Warn("OpenAPI docs and schema generation enabled")
+			} else {
+				logger.Warn("OpenAPI docs generation enabled")
+			}
+		}
+
 		serverErrors <- httpServer.ListenAndServe()
 	}()
 
@@ -117,7 +163,7 @@ func Run() error {
 
 	case sig := <-shutdown:
 		logger.Info("starting graceful shutdown", zap.String("signal", sig.String()))
-		cognito.Stop()
+		cognitoProvider.Stop()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
@@ -133,11 +179,29 @@ func Run() error {
 	return nil
 }
 
-func withCORSMiddleware(next http.Handler) http.Handler {
-	allowedOrigin := viper.GetString("http.cors.allowedOrigin")
-	allowedMethods := viper.GetString("http.cors.allowedMethods")
-	allowedHeaders := viper.GetString("http.cors.allowedHeaders")
-	allowCredentials := viper.GetBool("http.cors.allowCredentials")
+// corsWithCSRFHeader adds the CSRF header to the allowed CORS headers, so browsers can send it cross-origin.
+func corsWithCSRFHeader(cfg config.CORSConfig, csrfHeader string) config.CORSConfig {
+	if csrfHeader == "" {
+		return cfg
+	}
+	for _, h := range strings.Split(cfg.AllowedHeaders, ",") {
+		if strings.EqualFold(strings.TrimSpace(h), csrfHeader) {
+			return cfg
+		}
+	}
+	if strings.TrimSpace(cfg.AllowedHeaders) == "" {
+		cfg.AllowedHeaders = csrfHeader
+	} else {
+		cfg.AllowedHeaders += ", " + csrfHeader
+	}
+	return cfg
+}
+
+func withCORSMiddleware(cfg config.CORSConfig, next http.Handler) http.Handler {
+	allowedOrigin := cfg.AllowedOrigin
+	allowedMethods := cfg.AllowedMethods
+	allowedHeaders := cfg.AllowedHeaders
+	allowCredentials := cfg.AllowCredentials
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")

@@ -5,18 +5,39 @@ import (
 	"go.uber.org/zap"
 )
 
-var logger *zap.Logger
-
-func init() {
-	viper.SetDefault("logging.dev", false)
-	viper.SetDefault("logging.verbose", false)
+type Config struct {
+	Dev        bool
+	Verbose    bool
+	InstanceID string
 }
 
-func LoadConfig() {
-	devMode := viper.GetBool("logging.dev")
+var EnvBinds = map[string]string{
+	"logging.dev":     "LOGGING_DEV",
+	"logging.verbose": "LOGGING_VERBOSE",
+	"instance.id":     "INSTANCE_ID",
+}
+
+func SetDefaultConfig(v *viper.Viper) {
+	v.SetDefault("logging.dev", false)
+	v.SetDefault("logging.verbose", false)
+	v.SetDefault("instance.id", "proxylogin")
+}
+
+func LoadConfig(v *viper.Viper) (Config, error) {
+	return Config{
+		Dev:        v.GetBool("logging.dev"),
+		Verbose:    v.GetBool("logging.verbose"),
+		InstanceID: v.GetString("instance.id"),
+	}, nil
+}
+
+var logger *zap.Logger
+
+// Setup builds the root logger. It must run before any NewLogger call.
+func Setup(cfg Config) {
 	var err error
 
-	if devMode {
+	if cfg.Dev {
 		logger, err = zap.NewDevelopment()
 	} else {
 		logger, err = zap.NewProduction()
@@ -30,12 +51,12 @@ func LoadConfig() {
 		zap.AddStacktrace(zap.PanicLevel),
 	}
 
-	if viper.GetBool("logging.verbose") {
+	if cfg.Verbose {
 		opts = append(opts, zap.IncreaseLevel(zap.DebugLevel))
 	}
 
 	defer logger.Sync()
-	logger = logger.WithOptions(opts...).With(zap.String("instanceId", viper.GetString("instance.id")))
+	logger = logger.WithOptions(opts...).With(zap.String("instanceId", cfg.InstanceID))
 }
 
 func GetRootLogger() *zap.Logger {

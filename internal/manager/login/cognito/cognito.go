@@ -2,9 +2,14 @@ package cognito
 
 import (
 	"context"
+	appconfig "proxylogin/internal/manager/config"
 	"proxylogin/internal/manager/logging"
+	"proxylogin/internal/manager/login/masquerade"
 	loginTypes "proxylogin/internal/manager/login/types"
+	"proxylogin/internal/manager/ratelimiter"
 	"proxylogin/internal/manager/tools"
+	"proxylogin/internal/manager/tools/locking"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -12,33 +17,17 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider/types"
 	"github.com/aws/aws-sdk-go-v2/service/ses"
-	"github.com/spf13/viper"
+	"github.com/danielgtaylor/huma/v2"
 	"go.uber.org/zap"
-)
-
-var (
-	cognitoClientID          = ""
-	cognitoClientSecret      = ""
-	cognitoUserPoolID        = ""
-	cognitoJWKSIssuer        = ""
-	cognitoJWKSKeySigningURL = ""
-	loginSessionValidFor     time.Duration
-	jwksValidator            *tools.JWKSValidator
-	useAuthToRefresh         bool
-	awsConfig                aws.Config
-	cognitoClient            *cognitoidentityprovider.Client
-	sesClient                *ses.Client
-	poolClientDescription    *types.UserPoolClientType
-	poolDescription          *types.UserPoolType
-	userPoolMFAConfig        *cognitoidentityprovider.GetUserPoolMfaConfigOutput
-	enforceMFA               bool
-	stopWorkers              func()
+	"go.uber.org/zap/zapcore"
 )
 
 const (
 	AuthContextVarName         = "cognito_auth"
 	IdTokenContextVarName      = "cognito_id"
 	RefreshTokenContextVarName = "refresh_id"
+	LoginSessionContextVarName = "login_session_id"
+	CSRFTokenContextVarName    = "csrf_token"
 )
 
 var cognitoLogger *zap.Logger
@@ -50,61 +39,106 @@ func getLogger() *zap.Logger {
 	return cognitoLogger
 }
 
-func init() {
-	viper.SetDefault("cognito.enforceMFA", false)
+type Cognito struct {
+	cfg       appconfig.CognitoConfig
+	appConfig appconfig.Config
+
+	limiters       *ratelimiter.Factory
+	masq           *masquerade.Masquerade
+	locks          *locking.Provider
+	sessionStorage SessionStorage
+	csrf           *tools.CSRF
+
+	loginSessionMutexManager             tools.NamedMutexManager
+	verifyUserMFATokenOnLoginLimiter     ratelimiter.TotalLimiter
+	verifyUserMFATokenOnLoginLimiterOnce sync.Once
+
+	processingLogLevel zapcore.Level
+
+	awsConfig             aws.Config
+	cognitoClient         *cognitoidentityprovider.Client
+	sesClient             *ses.Client
+	poolClientDescription *types.UserPoolClientType
+	poolDescription       *types.UserPoolType
+	userPoolMFAConfig     *cognitoidentityprovider.GetUserPoolMfaConfigOutput
+	jwksValidator         *tools.JWKSValidator
+	useAuthToRefresh      bool
+	loginSessionValidFor  time.Duration
+
+	tasks       chan taskWrapper
+	stopWorkers func()
+	taskAppenders
+	withAllowedOriginMiddleware func(ctx huma.Context, next func(huma.Context))
 }
 
-func loadSettings() error {
+// New builds a Cognito login provider from cfg. It does not contact AWS; call Start for that.
+func New(cfg appconfig.Config, csrf *tools.CSRF) (*Cognito, error) {
+	c := &Cognito{
+		cfg:                cfg.CognitoConfig,
+		appConfig:          cfg,
+		limiters:           ratelimiter.NewFactory(cfg.RateLimiterConfig, cfg.RedisClientConfig),
+		locks:              locking.NewProvider(cfg.StorageType, cfg.RedisClientConfig),
+		processingLogLevel: zapcore.InfoLevel,
+		tasks:              make(chan taskWrapper),
+		csrf:               csrf,
+	}
 
-	cognitoClientID = viper.GetString("cognito.clientId")
-	cognitoClientSecret = viper.GetString("cognito.clientSecret")
-	cognitoUserPoolID = viper.GetString("cognito.userPoolId")
-	cognitoJWKSIssuer = viper.GetString("cognito.jwksIssuer")
-	cognitoJWKSKeySigningURL = viper.GetString("cognito.jwksSigningKeyURL")
-	enforceMFA = viper.GetBool("cognito.enforceMFA")
+	if err := c.validateSettings(); err != nil {
+		return nil, err
+	}
 
-	err := validateSettings()
+	var err error
+	c.masq, err = masquerade.New(cfg.MasqueradeConfig, cfg.StorageType, cfg.RedisClientConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = c.createSessionsStorage(cfg.StorageType, cfg.RedisClientConfig); err != nil {
+		return nil, err
+	}
+
+	c.loadProcessingSettings()
+	c.initTaskAppenders()
+
+	return c, nil
+}
+
+func (c *Cognito) loadSettings() error {
+	var err error
+
+	c.poolClientDescription = describeUserPoolClient(c.cognitoClient, c.cfg.UserPoolID, c.cfg.Client.ID)
+	c.poolDescription = describeUserPool(c.cognitoClient, c.cfg.UserPoolID)
+
+	c.userPoolMFAConfig = getUserPoolMfaConfig(c.cognitoClient, c.cfg.UserPoolID)
+
+	c.useAuthToRefresh = c.poolClientDescription.EnableTokenRevocation != nil && *c.poolClientDescription.EnableTokenRevocation
+
+	if c.poolClientDescription.AuthSessionValidity != nil {
+		c.loginSessionValidFor = time.Duration(*c.poolClientDescription.AuthSessionValidity*60) * time.Second
+	}
+
+	c.jwksValidator, err = tools.NewJWKSValidator(c.cfg.JWKSSigningKeyURL, c.cfg.JWKSIssuer, "")
+
 	if err != nil {
 		return err
 	}
-
-	poolClientDescription = describeUserPoolClient(cognitoClient, cognitoUserPoolID, cognitoClientID)
-	poolDescription = describeUserPool(cognitoClient, cognitoUserPoolID)
-
-	userPoolMFAConfig = getUserPoolMfaConfig(cognitoClient, cognitoUserPoolID)
-
-	useAuthToRefresh = poolClientDescription.EnableTokenRevocation != nil && *poolClientDescription.EnableTokenRevocation
-
-	if poolClientDescription.AuthSessionValidity != nil {
-		loginSessionValidFor = time.Duration(*poolClientDescription.AuthSessionValidity*60) * time.Second
-	}
-
-	jwksValidator, err = tools.NewJWKSValidator(cognitoJWKSKeySigningURL, cognitoJWKSIssuer, "")
-
-	if err != nil {
-		return err
-	}
-
-	loadProcessingSettings()
-
-	createSessionsStorage()
 
 	return nil
 }
 
-func validateSettings() error {
+func (c *Cognito) validateSettings() error {
 	validationIssues := make(map[string]string)
 
-	if cognitoClientID == "" {
+	if c.cfg.Client.ID == "" {
 		validationIssues["cognito.clientId"] = "must be set"
 	}
-	if cognitoUserPoolID == "" {
+	if c.cfg.UserPoolID == "" {
 		validationIssues["cognito.userPoolId"] = "must be set"
 	}
-	if cognitoJWKSIssuer == "" {
+	if c.cfg.JWKSIssuer == "" {
 		validationIssues["cognito.jwksIssuer"] = "must be set"
 	}
-	if cognitoJWKSKeySigningURL == "" {
+	if c.cfg.JWKSSigningKeyURL == "" {
 		validationIssues["cognito.jwksSigningKeyURL"] = "must be set"
 	}
 
@@ -156,27 +190,28 @@ func getUserPoolMfaConfig(client *cognitoidentityprovider.Client, userPoolId str
 	return result
 }
 
-func Start() error {
+// Start loads AWS config, describes the user pool and starts task workers.
+func (c *Cognito) Start() error {
 	var err error
-	awsConfig, err = config.LoadDefaultConfig(context.Background())
+	c.awsConfig, err = config.LoadDefaultConfig(context.Background())
 	if err != nil {
 		return err
 	}
-	cognitoClient = cognitoidentityprovider.NewFromConfig(awsConfig)
-	sesClient = ses.NewFromConfig(awsConfig)
+	c.cognitoClient = cognitoidentityprovider.NewFromConfig(c.awsConfig)
+	c.sesClient = ses.NewFromConfig(c.awsConfig)
 
-	err = loadSettings()
+	err = c.loadSettings()
 	if err != nil {
 		return err
 	}
 
-	stopWorkers = StartWorkers(viper.GetUint64("cognito.workers"))
+	c.stopWorkers = c.StartWorkers(c.cfg.Workers)
 
 	return nil
 }
 
-func Stop() {
-	if stopWorkers != nil {
-		stopWorkers()
+func (c *Cognito) Stop() {
+	if c.stopWorkers != nil {
+		c.stopWorkers()
 	}
 }

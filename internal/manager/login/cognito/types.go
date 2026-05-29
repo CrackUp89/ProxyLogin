@@ -11,12 +11,15 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 )
 
-type MasqueradedAuth struct {
+type withToken struct {
 	Token string
+}
+type MasqueradedAuth struct {
+	withToken
 }
 
 type TokenAuth struct {
-	Token string
+	withToken
 }
 
 type RefreshMethod string
@@ -30,8 +33,9 @@ var (
 type NextStep string
 
 const (
+	NextStepLogin                       NextStep = "login"
 	NextStepMFASetup                    NextStep = "mfa_setup"
-	NextStepMFASoftwareTokenSetupVerify NextStep = "mfa_software_token_setup_verify"
+	NextStepMFASoftwareTokenSetupVerify NextStep = "mfa_token_setup_verify"
 	NextStepMFASelect                   NextStep = "mfa_select"
 	NextStepMFASoftwareTokenVerify      NextStep = "mfa_software_token_verify"
 	NextStepMFAEMailVerify              NextStep = "mfa_email_verify"
@@ -105,9 +109,23 @@ func registerSharedSchemas(api huma.API) {
 	}
 }
 
+type NextLoginStepResponse struct {
+	Step    NextStep    `json:"step,omitempty" enum:"mfa_setup,mfa_token_setup_verify,mfa_select,mfa_software_token_verify,mfa_email_verify,mfa_sms_verify,new_password"`
+	Payload interface{} `json:"payload,omitempty"`
+}
+
+type LoginStartResponseBody struct {
+	CSRFToken string `json:"csrf_token" doc:"Send this in the CSRF header with every following login flow request"`
+}
+
+type LoginStartResponseOutput struct {
+	SetCookie []http.Cookie `header:"Set-Cookie"`
+	Body      LoginStartResponseBody
+}
+
 type AuthTaskResponse struct {
-	NextStep   *NextLoginStep `json:"next_step,omitempty"`
-	AuthResult interface{}    `json:"auth_result,omitempty"`
+	NextStep   NextLoginStepResponse `json:"next_step,omitempty"`
+	AuthResult interface{}           `json:"auth_result,omitempty"`
 }
 
 func (t AuthTaskResponse) TransformSchema(r huma.Registry, s *huma.Schema) *huma.Schema {
@@ -204,14 +222,6 @@ type TaskResponseOutput[T any] struct {
 
 type GenericTaskResponseOutput = TaskResponseOutput[interface{}]
 
-func (t *TaskResponseOutput[T]) SetSetCookie(cookies []http.Cookie) {
-	t.SetCookie = cookies
-}
-
-func (t *TaskResponseOutput[T]) GetSetCookie() []http.Cookie {
-	return t.SetCookie
-}
-
 func (t *TaskResponseOutput[T]) SetBody(body T) {
 	t.Body = body
 }
@@ -261,8 +271,16 @@ type LoginInput struct {
 	Body loginRequest
 }
 
+type externalLoginRequest struct {
+	Code     string `json:"code" minLength:"1" doc:"Code received from external authentication authority"`
+	Remember bool   `json:"remember" doc:"Remember user session" required:"false"`
+}
+
+type ExternalLoginInput struct {
+	Body externalLoginRequest
+}
+
 type mfaSetupRequest struct {
-	Session string `json:"session" minLength:"1" doc:"Login session key"`
 	User    string `json:"user" minLength:"1" doc:"Username"`
 	MFAType string `json:"mfa_type" minLength:"1" doc:"MFA type to set up"`
 }
@@ -271,30 +289,28 @@ type MFASetupInput struct {
 	Body mfaSetupRequest
 }
 
-type mfaSetupVerifySoftwareTokenRequest struct {
-	Session string `json:"session" minLength:"1" doc:"Login session key"`
-	User    string `json:"user" minLength:"1" doc:"Username"`
-	Code    string `json:"code" minLength:"1" doc:"TOTP verification code"`
+type mfaSetupVerifyTokenRequest struct {
+	User string `json:"user" minLength:"1" doc:"Username"`
+	Code string `json:"code" minLength:"1" doc:"Verification code"`
 }
 
-type MFASetupVerifySoftwareTokenInput struct {
-	Body mfaSetupVerifySoftwareTokenRequest
+type MFASetupVerifyTokenInput struct {
+	Body mfaSetupVerifyTokenRequest
 }
 
-type mfaSoftwareTokenVerifyRequest struct {
-	Session string `json:"session" minLength:"1" doc:"Login session key"`
-	User    string `json:"user" minLength:"1" doc:"Username"`
-	Code    string `json:"code" minLength:"1" doc:"TOTP verification code"`
+type mfaTokenVerifyRequest struct {
+	User string `json:"user" minLength:"1" doc:"Username"`
+	Code string `json:"code" minLength:"1" doc:"Verification code"`
 }
 
-type MFASoftwareTokenVerifyInput struct {
-	Body mfaSoftwareTokenVerifyRequest
+type MFATokenVerifyInput struct {
+	Body mfaTokenVerifyRequest
 }
 
 type refreshTokenRequest struct {
-	User     string `json:"user" doc:"Username"`
-	Token    string `json:"token" doc:"Refresh token"`
-	Remember bool   `json:"remember" doc:"Remember user session"`
+	User     string  `json:"user" doc:"Username"`
+	Token    *string `json:"token,omitempty"  doc:"Refresh token" required:"false"`
+	Remember *bool   `json:"remember,omitempty" doc:"Remember user session" required:"false"`
 }
 
 type RefreshTokenInput struct {
@@ -302,7 +318,7 @@ type RefreshTokenInput struct {
 }
 
 type logOutRequest struct {
-	Token string `json:"token" minLength:"1" doc:"Refresh token to revoke"`
+	Token string `json:"token,omitempty" required:"false" doc:"Refresh token to revoke"`
 }
 
 type LogOutInput struct {
@@ -310,7 +326,6 @@ type LogOutInput struct {
 }
 
 type satisfyPasswordUpdateRequest struct {
-	Session    string            `json:"session" minLength:"1" doc:"Login session key"`
 	User       string            `json:"user" minLength:"1" doc:"Username"`
 	Password   string            `json:"password" minLength:"1" doc:"New password"`
 	Attributes map[string]string `json:"attributes,omitempty" doc:"Additional user attributes"`
@@ -329,24 +344,15 @@ type UpdatePasswordInput struct {
 	Body updatePasswordRequest
 }
 
-type updateMFARequest struct {
-	MFAType types.MFAType `json:"mfa_type" minLength:"1" doc:"MFA type to configure"`
-}
-
-type UpdateMFAInput struct {
-	Body updateMFARequest
-}
-
 type verifyMFAUpdateRequest struct {
 	Code string `json:"code" minLength:"1" doc:"TOTP verification code"`
 }
 
-type VerifyMFAUpdateInput struct {
+type VerifyMFASoftwareTokenUpdateInput struct {
 	Body verifyMFAUpdateRequest
 }
 
 type selectMFARequest struct {
-	Session string        `json:"session" minLength:"1" doc:"Login session key"`
 	User    string        `json:"user" minLength:"1" doc:"Username"`
 	MFAType types.MFAType `json:"mfa_type" minLength:"1" doc:"MFA type to select"`
 }

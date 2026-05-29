@@ -1,0 +1,40 @@
+### Step 4 — Verify TOTP setup with a generated code from the secret
+# A pre-request script uses the `otpauth` npm package to derive the current TOTP code
+# from the secret captured in the previous step.
+# On success, MFA is enrolled and the service returns auth_result (login complete).
+# @name mfa-setup-verify
+POST {{host}}/v1/login/mfa/setup/verify
+Cookie: {{session_cookie}}
+X-CSRF-Auth-Token: {{csrf_token}}
+Content-Type: application/json
+
+< {%
+  const { TOTP, Secret } = require('otpauth');
+  const secret = client.global.get('totp_secret');
+  const totp = new TOTP({
+    issuer: 'ProxyLogin',
+    label: client.global.get('username') || 'test',
+    algorithm: 'SHA1',
+    digits: 6,
+    period: 30,
+    secret: Secret.fromBase32(secret),
+  });
+  client.global.set('totp_code', totp.generate());
+%}
+
+{
+  "user": "{{username}}",
+  "code": "{{totp_code}}"
+}
+
+> {%
+  client.test("MFA setup verify returns 200", () => {
+    client.assert(response.status === 200, "Expected 200, got " + response.status);
+  });
+  client.test("Login is complete after MFA setup", () => {
+    client.assert(response.body.auth_result !== undefined, "Missing auth_result — MFA setup did not complete login");
+    client.assert(response.body.auth_result.login_type === "token_set", "Expected login_type=token_set");
+  });
+  client.global.set("access_token", response.body.auth_result.login_data.access_token);
+  client.global.set("refresh_token", response.body.auth_result.login_data.refresh_token);
+%}

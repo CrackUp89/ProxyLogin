@@ -1,0 +1,22 @@
+### Refresh tokens using the refresh token from login
+# @name refresh
+POST {{host}}/v1/refresh
+Content-Type: application/json
+
+{
+  "user": "{{username}}",
+  "token": "{{refresh_token}}",
+  "remember": false
+}
+
+> {%
+  client.test("Refresh returns 200", () => {
+    client.assert(response.status === 200, "Expected 200, got " + response.status);
+  });
+  client.test("Response contains new tokens", () => {
+    client.assert(response.body.auth_result !== undefined, "Missing auth_result");
+    client.assert(response.body.auth_result.login_data.access_token !== undefined, "Missing new access_token");
+  });
+  client.global.set("access_token", response.body.auth_result.login_data.access_token);
+  client.global.set("refresh_token", response.body.auth_result.login_data.refresh_token);
+%}

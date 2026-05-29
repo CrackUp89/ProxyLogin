@@ -5,9 +5,6 @@ import (
 	"log"
 	"os"
 	"proxylogin/internal/manager/config"
-	"proxylogin/internal/manager/login/masquerade"
-	"proxylogin/internal/manager/ratelimiter"
-	"proxylogin/internal/manager/redisclient"
 	"strings"
 	"sync"
 
@@ -15,6 +12,8 @@ import (
 )
 
 var loadConfigOnce = &sync.Once{}
+var testingConfig config.Config
+var testingConfigErr error
 
 func loadEnvFile() {
 	var err error
@@ -41,12 +40,10 @@ func loadEnvFile() {
 
 func loadConfig() {
 	loadEnvFile()
-	config.LoadConfig()
-	redisclient.LoadConfig()
-	ratelimiter.LoadConfig()
-	masquerade.LoadConfig()
+	testingConfig, testingConfigErr = config.LoadConfig(viper.New())
 }
 
-func PrepareTestingEnv() {
+func PrepareTestingEnv() (config.Config, error) {
 	loadConfigOnce.Do(loadConfig)
+	return testingConfig, testingConfigErr
 }

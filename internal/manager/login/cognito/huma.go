@@ -34,10 +34,10 @@ type LoginStepMFASetup struct {
 	Payload *MFAMethodListPayload `json:"payload,omitempty" doc:"Available MFA methods to set up"`
 }
 
-// LoginStepMFASoftwareTokenSetupVerify describes the mfa_software_token_setup_verify step.
+// LoginStepMFASoftwareTokenSetupVerify describes the mfa_token_setup_verify step.
 // Payload contains the TOTP secret code the client uses to configure their authenticator app.
 type LoginStepMFASoftwareTokenSetupVerify struct {
-	Step    NextStep `json:"step,omitempty" enum:"mfa_software_token_setup_verify" default:"mfa_software_token_setup_verify" doc:"Name of the next login step"`
+	Step    NextStep `json:"step,omitempty" enum:"mfa_token_setup_verify" default:"mfa_token_setup_verify" doc:"Name of the next login step"`
 	Session string   `json:"session,omitempty" doc:"Current authentication session"`
 	Payload string   `json:"payload,omitempty" doc:"TOTP secret code for authenticator app configuration"`
 }

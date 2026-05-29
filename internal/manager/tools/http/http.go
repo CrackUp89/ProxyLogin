@@ -14,37 +14,44 @@ import (
 	"go.uber.org/zap"
 )
 
-var proxySecret string
-var proxySecretHeader string
-var proxySecretStrict bool
-var realIPHeader string
-var forwardedForHeader string
-
-func init() {
-	viper.SetDefault("http.proxySecret", "")
-	viper.SetDefault("http.proxySecretHeader", "X-Proxy-Secret")
-	viper.SetDefault("http.proxySecretStrict", false)
-	viper.SetDefault("http.realIPHeader", "X-Real-IP")
-	viper.SetDefault("http.forwardedForHeader", "X-Forwarded-For")
+type Config struct {
+	ProxySecret        string
+	ProxySecretHeader  string
+	ProxySecretStrict  bool
+	RealIPHeader       string
+	ForwardedForHeader string
 }
 
-func LoadConfig() {
-	proxySecret = viper.GetString("http.proxySecret")
-	proxySecretHeader = viper.GetString("http.proxySecretHeader")
-	proxySecretStrict = viper.GetBool("http.proxySecretStrict")
-	proxySecretCheckDisabled := proxySecret == "" || proxySecretHeader == ""
+var EnvBinds = map[string]string{
+	"http.proxySecret":        "HTTP_PROXY_SECRET",
+	"http.proxySecretHeader":  "HTTP_PROXY_SECRET_HEADER",
+	"http.proxySecretStrict":  "HTTP_PROXY_SECRET_STRICT",
+	"http.realIPHeader":       "HTTP_REAL_IP_HEADER",
+	"http.forwardedForHeader": "HTTP_FORWARDED_FOR_HEADER",
+}
 
-	logger := getLogger()
+func SetDefaultConfig(v *viper.Viper) {
+	v.SetDefault("http.proxySecret", "")
+	v.SetDefault("http.proxySecretHeader", "X-Proxy-Secret")
+	v.SetDefault("http.proxySecretStrict", false)
+	v.SetDefault("http.realIPHeader", "X-Real-IP")
+	v.SetDefault("http.forwardedForHeader", "X-Forwarded-For")
+}
 
-	realIPHeader = viper.GetString("http.realIPHeader")
-	if realIPHeader != "" && proxySecretCheckDisabled {
-		logger.Warn("http.realIPHeader is set, but http.proxySecret or http.proxySecretHeader is not set - this may allow real IP spoofing")
+func LoadConfig(v *viper.Viper) (Config, error) {
+	r := Config{
+		ProxySecret:        v.GetString("http.proxySecret"),
+		ProxySecretHeader:  v.GetString("http.proxySecretHeader"),
+		ProxySecretStrict:  v.GetBool("http.proxySecretStrict"),
+		RealIPHeader:       v.GetString("http.realIPHeader"),
+		ForwardedForHeader: v.GetString("http.forwardedForHeader"),
 	}
 
-	forwardedForHeader = viper.GetString("http.forwardedForHeader")
-	if forwardedForHeader != "" && proxySecretCheckDisabled {
-		logger.Warn("http.forwardedForHeader is set, but http.proxySecret or http.proxySecretHeader is not set - this may allow to spoof forwarding info")
-	}
+	return r, nil
+}
+
+func (c Config) proxySecretCheckDisabled() bool {
+	return c.ProxySecret == "" || c.ProxySecretHeader == ""
 }
 
 var httpToolsLogger *zap.Logger
@@ -74,6 +81,7 @@ type RequestMetadata struct {
 	Host         string `json:"host"`
 	RequestURI   string `json:"uri"`
 	RemoteAddr   string `json:"remote_addr"`
+	RemotePort   string `json:"remote_port"`
 	RealIP       string `json:"real_ip"`
 	ForwardedFor string `json:"forwarded_for"`
 }
@@ -93,11 +101,7 @@ func (receiver *RequestMetadata) GetClientIP() string {
 	if receiver.RealIP != "" {
 		return receiver.RealIP
 	}
-	lastIdx := strings.LastIndex(receiver.RemoteAddr, ":")
-	if lastIdx == -1 {
-		return receiver.RemoteAddr
-	}
-	return receiver.RemoteAddr[:lastIdx]
+	return receiver.RemoteAddr
 }
 
 func getLoggerWithRequestMetadataFields(l *zap.Logger, md *RequestMetadata) *zap.Logger {
@@ -107,25 +111,45 @@ func getLoggerWithRequestMetadataFields(l *zap.Logger, md *RequestMetadata) *zap
 	return l.WithLazy(md.GetZapFields()...)
 }
 
-func validateProxySecret(r *http.Request) (string, bool, bool) {
-	if proxySecret == "" || proxySecretHeader == "" {
+func validateProxySecret(cfg Config, r *http.Request) (string, bool, bool) {
+	if cfg.proxySecretCheckDisabled() {
 		return "", true, false
 	}
-	requestProxySecret := r.Header.Get(proxySecretHeader)
-	valid := requestProxySecret == proxySecret
-	return requestProxySecret, valid, !valid && proxySecretStrict
+	requestProxySecret := r.Header.Get(cfg.ProxySecretHeader)
+	valid := requestProxySecret == cfg.ProxySecret
+	return requestProxySecret, valid, !valid && cfg.ProxySecretStrict
 }
 
-func WithRequestMetadataContextMiddleware(next http.Handler) http.Handler {
+func warnAboutSpoofableHeaders(cfg Config) {
+	if !cfg.proxySecretCheckDisabled() {
+		return
+	}
+
+	logger := getLogger()
+
+	if cfg.RealIPHeader != "" {
+		logger.Warn("http.realIPHeader is set, but http.proxySecret or http.proxySecretHeader is not set - this may allow real IP spoofing")
+	}
+
+	if cfg.ForwardedForHeader != "" {
+		logger.Warn("http.forwardedForHeader is set, but http.proxySecret or http.proxySecretHeader is not set - this may allow to spoof forwarding info")
+	}
+}
+
+func WithRequestMetadataContextMiddleware(cfg Config, next http.Handler) http.Handler {
+	warnAboutSpoofableHeaders(cfg)
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remote := strings.Split(r.RemoteAddr, ":")
 		md := &RequestMetadata{
 			ID:         uuid.NewString(),
 			Host:       r.Host,
 			RequestURI: r.RequestURI,
-			RemoteAddr: r.RemoteAddr,
+			RemoteAddr: remote[0],
+			RemotePort: remote[1],
 		}
 
-		requestProxySecret, proxySecretValid, abort := validateProxySecret(r)
+		requestProxySecret, proxySecretValid, abort := validateProxySecret(cfg, r)
 
 		if !proxySecretValid {
 			getLoggerWithRequestMetadataFields(getLogger(), md).Error("proxy secret is invalid", zap.String("proxySecret", requestProxySecret))
@@ -136,12 +160,12 @@ func WithRequestMetadataContextMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if proxySecretValid && realIPHeader != "" {
-			md.RealIP = r.Header.Get(realIPHeader)
+		if proxySecretValid && cfg.RealIPHeader != "" {
+			md.RealIP = r.Header.Get(cfg.RealIPHeader)
 		}
 
-		if proxySecretValid && forwardedForHeader != "" {
-			md.ForwardedFor = r.Header.Get(forwardedForHeader)
+		if proxySecretValid && cfg.ForwardedForHeader != "" {
+			md.ForwardedFor = r.Header.Get(cfg.ForwardedForHeader)
 		}
 
 		md.GetClientIP()

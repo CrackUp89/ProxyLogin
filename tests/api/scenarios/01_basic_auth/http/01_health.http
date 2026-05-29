@@ -1,0 +1,9 @@
+### Health check
+# @name health
+GET {{host}}/v1/health
+
+> {%
+  client.test("Status is 200", () => {
+    client.assert(response.status === 200, "Expected 200, got " + response.status);
+  });
+%}

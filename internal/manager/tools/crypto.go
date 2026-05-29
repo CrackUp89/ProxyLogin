@@ -7,17 +7,18 @@ import (
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-func GenerateRandomString(length int) string {
-	result := make([]byte, length)
-	charsetLength := big.NewInt(int64(len(charset)))
+var charsetLength = big.NewInt(int64(len(charset)))
 
-	for i := 0; i < length; i++ {
+func GenerateRandomString(length int) (string, error) {
+	result := make([]byte, length)
+
+	for i := range length {
 		randomIndex, err := rand.Int(rand.Reader, charsetLength)
 		if err != nil {
-			panic(err)
+			return "", err
 		}
 		result[i] = charset[randomIndex.Int64()]
 	}
 
-	return string(result)
+	return string(result), nil
 }

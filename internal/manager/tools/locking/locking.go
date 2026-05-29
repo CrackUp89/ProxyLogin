@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"proxylogin/internal/manager/config"
 	"proxylogin/internal/manager/redisclient"
+	"proxylogin/internal/manager/storage"
 	"sync"
 	"time"
 
@@ -106,6 +106,7 @@ func getLocalReturnOnce[T any](key string, ttl time.Duration) ReturnOnce[T] {
 }
 
 type RedisReturnOnce[T any] struct {
+	client *redisclient.ClientWrapper
 	key    string
 	ttl    time.Duration
 	once   *sync.Once
@@ -118,16 +119,16 @@ func (r *RedisReturnOnce[T]) Key() string {
 	return r.key
 }
 
-func getErrorKey(key string) string {
-	return redisclient.BuildKey("returnOnce:", key+".error")
+func getErrorKey(client *redisclient.ClientWrapper, key string) string {
+	return client.BuildKey("returnOnce:", key+".error")
 }
 
-func getResultKey(key string) string {
-	return redisclient.BuildKey("returnOnce:", key+".result")
+func getResultKey(client *redisclient.ClientWrapper, key string) string {
+	return client.BuildKey("returnOnce:", key+".result")
 }
 
-func getLockKey(key string) string {
-	return redisclient.BuildKey("returnOnce:", key+".lock")
+func getLockKey(client *redisclient.ClientWrapper, key string) string {
+	return client.BuildKey("returnOnce:", key+".lock")
 }
 
 func (r *RedisReturnOnce[T]) Do(ctx context.Context, f ReturnOnceFunc[T]) (T, error) {
@@ -136,11 +137,11 @@ func (r *RedisReturnOnce[T]) Do(ctx context.Context, f ReturnOnceFunc[T]) (T, er
 	defer r.mutex.Unlock()
 
 	r.once.Do(func() {
-		lockKey := getLockKey(r.key)
-		resultKey := getResultKey(r.key)
-		errorKey := getErrorKey(r.key)
+		lockKey := getLockKey(r.client, r.key)
+		resultKey := getResultKey(r.client, r.key)
+		errorKey := getErrorKey(r.client, r.key)
 
-		client := redisclient.GetClient()
+		client := r.client.Client()
 
 		ps := client.Subscribe(ctx, resultKey, errorKey)
 		psResultChan := make(chan T, 1)
@@ -270,25 +271,40 @@ func (r *RedisReturnOnce[T]) Do(ctx context.Context, f ReturnOnceFunc[T]) (T, er
 	return r.result, r.err
 }
 
-func getRedisReturnOnce[T any](key string, ttl time.Duration) ReturnOnce[T] {
+func getRedisReturnOnce[T any](client *redisclient.ClientWrapper, key string, ttl time.Duration) ReturnOnce[T] {
 	r, _ := roRegistry.LoadOrStore(key,
 		&RedisReturnOnce[T]{
-			key:   key,
-			ttl:   ttl,
-			once:  &sync.Once{},
-			mutex: &sync.Mutex{},
+			client: client,
+			key:    key,
+			ttl:    ttl,
+			once:   &sync.Once{},
+			mutex:  &sync.Mutex{},
 		})
 	return &ReturnOnceWrapper[T]{
 		ro: r.(ReturnOnce[T]),
 	}
 }
 
-func GetReturnOnce[T any](key string, ttl time.Duration) ReturnOnce[T] {
-	switch config.GetStorageType() {
-	case config.MemoryStorageType:
+// Provider hands out ReturnOnce instances backed by the configured storage.
+type Provider struct {
+	storageType storage.Type
+	client      *redisclient.ClientWrapper
+}
+
+func NewProvider(storageType storage.Type, redisCfg redisclient.Config) *Provider {
+	p := &Provider{storageType: storageType}
+	if storageType == storage.RedisType {
+		p.client = redisclient.GetDefaultClient(redisCfg)
+	}
+	return p
+}
+
+func GetReturnOnce[T any](p *Provider, key string, ttl time.Duration) ReturnOnce[T] {
+	switch p.storageType {
+	case storage.MemoryType:
 		return getLocalReturnOnce[T](key, ttl)
-	case config.RedisStorageType:
-		return getRedisReturnOnce[T](key, ttl)
+	case storage.RedisType:
+		return getRedisReturnOnce[T](p.client, key, ttl)
 	}
 	panic("unreachable")
 }

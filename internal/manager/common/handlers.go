@@ -7,11 +7,17 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 )
 
+type Handlers struct{}
+
+func New() *Handlers {
+	return &Handlers{}
+}
+
 type HealthOutput struct {
 	Body struct{}
 }
 
-func AddRoutes(api huma.API) {
+func (h *Handlers) AddRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID:  "health",
 		Method:       http.MethodGet,

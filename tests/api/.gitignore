@@ -1,0 +1,4 @@
+node_modules/
+bin/
+scenarios/*/.generated.env
+scenarios/*/http/http-client.private.env.json

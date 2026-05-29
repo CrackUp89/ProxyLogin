@@ -1,0 +1,41 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CognitoForProxyLoginTests",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-idp:ListUserPools",
+        "cognito-idp:CreateUserPool",
+        "cognito-idp:DeleteUserPool",
+        "cognito-idp:DescribeUserPool",
+        "cognito-idp:ListUserPoolClients",
+        "cognito-idp:CreateUserPoolClient",
+        "cognito-idp:DeleteUserPoolClient",
+        "cognito-idp:DescribeUserPoolClient",
+        "cognito-idp:AdminCreateUser",
+        "cognito-idp:AdminDeleteUser",
+        "cognito-idp:AdminGetUser",
+        "cognito-idp:AdminSetUserPassword",
+        "cognito-idp:InitiateAuth",
+        "cognito-idp:RespondToAuthChallenge",
+        "cognito-idp:RevokeToken",
+        "cognito-idp:GlobalSignOut",
+        "cognito-idp:GetUser",
+        "cognito-idp:ChangePassword",
+        "cognito-idp:AssociateSoftwareToken",
+        "cognito-idp:VerifySoftwareToken",
+        "cognito-idp:SetUserMFAPreference",
+        "cognito-idp:GetUserAttributeVerificationCode",
+        "cognito-idp:SetUserPoolMfaConfig"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SelfModifyMetadataHopLimit",
+      "Effect": "Allow",
+      "Action": "ec2:ModifyInstanceMetadataOptions",
+      "Resource": "arn:aws:ec2:*:*:instance/*"
+    }
+  ]
+}

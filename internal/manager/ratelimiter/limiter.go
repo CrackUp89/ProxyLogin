@@ -2,7 +2,9 @@ package ratelimiter
 
 import (
 	"context"
+	"fmt"
 	"proxylogin/internal/manager/redisclient"
+	"proxylogin/internal/manager/storage"
 	"sync"
 	"time"
 
@@ -10,28 +12,50 @@ import (
 	"golang.org/x/time/rate"
 )
 
-type storageType string
-
-var (
-	MEMORY storageType = "memory"
-	REDIS  storageType = "redis"
-)
-
-var limiterStorageType storageType
-
-var idleTTL time.Duration
-
-func init() {
-	viper.SetDefault("ratelimiter.storage", MEMORY)
-	viper.SetDefault("ratelimiter.idleTTL", 300) //todo: make individually configurable
+type Config struct {
+	StorageType storage.Type
+	IdleTTL     time.Duration
 }
 
-func LoadConfig() {
-	limiterStorageType = storageType(viper.GetString("ratelimiter.storage"))
-	idleTTL = viper.GetDuration("ratelimiter.idleTTL") * time.Second
+var EnvBinds = map[string]string{
+	"ratelimiter.storage": "RATELIMITER_STORAGE",
+	"ratelimiter.idleTTL": "RATELIMITER_IDLE_TTL",
 }
 
-func startEvictionRoutine(name string, evict func()) {
+func SetDefaultConfig(v *viper.Viper) {
+	v.SetDefault("ratelimiter.storage", storage.MemoryType)
+	v.SetDefault("ratelimiter.idleTTL", 300) //todo: make individually configurable
+}
+
+func LoadConfig(v *viper.Viper) (Config, error) {
+	r := Config{}
+
+	var err error
+	r.StorageType, err = storage.ParseType(v.GetString("ratelimiter.storage"))
+	if err != nil {
+		return r, fmt.Errorf("ratelimiter: %w", err)
+	}
+
+	r.IdleTTL = v.GetDuration("ratelimiter.idleTTL") * time.Second
+
+	return r, nil
+}
+
+// Factory creates limiters backed by the configured storage.
+type Factory struct {
+	cfg    Config
+	client *redisclient.ClientWrapper
+}
+
+func NewFactory(cfg Config, redisCfg redisclient.Config) *Factory {
+	f := &Factory{cfg: cfg}
+	if cfg.StorageType == storage.RedisType {
+		f.client = redisclient.GetDefaultClient(redisCfg)
+	}
+	return f
+}
+
+func startEvictionRoutine(idleTTL time.Duration, evict func()) {
 	go func() {
 		ticker := time.NewTicker(idleTTL / 2)
 		defer ticker.Stop()
@@ -45,19 +69,27 @@ type Limiter interface {
 	Allow(ctx context.Context, key string) (bool, error)
 }
 
-func NewLimiter(name string, limit int, window time.Duration) Limiter {
-	switch limiterStorageType {
-	case MEMORY:
+func (f *Factory) NewLimiter(name string, limit int, window time.Duration) Limiter {
+	switch f.cfg.StorageType {
+	case storage.MemoryType:
 		burst := int(float32(limit) / float32(window/time.Second))
 		if burst < 1 {
 			burst = 1
 		}
 		rps := rate.Every(window / time.Duration(limit))
-		return NewTokenBucketLimiter(name, rps, burst)
-	case REDIS:
-		return NewRedisRateLimiter(name, limit, window)
+		return NewTokenBucketLimiter(name, rps, burst, f.cfg.IdleTTL)
+	case storage.RedisType:
+		return NewRedisRateLimiter(f.client, name, limit, window)
 	}
 	panic("invalid storage type")
+}
+
+type noOpLimiter struct{}
+
+var NoOpLimiter = &noOpLimiter{}
+
+func (n noOpLimiter) Allow(_ context.Context, _ string) (bool, error) {
+	return true, nil
 }
 
 type limiterEntry struct {
@@ -71,16 +103,18 @@ type TokenBucketLimiter struct {
 	limiters map[string]*limiterEntry
 	rate     rate.Limit
 	burst    int
+	idleTTL  time.Duration
 }
 
-func NewTokenBucketLimiter(name string, rps rate.Limit, burst int) *TokenBucketLimiter {
+func NewTokenBucketLimiter(name string, rps rate.Limit, burst int, idleTTL time.Duration) *TokenBucketLimiter {
 	tbl := &TokenBucketLimiter{
 		name:     name,
 		limiters: make(map[string]*limiterEntry),
 		rate:     rps,
 		burst:    burst,
+		idleTTL:  idleTTL,
 	}
-	startEvictionRoutine(name, func() { tbl.evictIdle() })
+	startEvictionRoutine(idleTTL, func() { tbl.evictIdle() })
 	return tbl
 }
 
@@ -106,7 +140,7 @@ func (tbl *TokenBucketLimiter) evictIdle() {
 	tbl.mu.Lock()
 	defer tbl.mu.Unlock()
 
-	cutoff := time.Now().Add(-idleTTL)
+	cutoff := time.Now().Add(-tbl.idleTTL)
 	for key, entry := range tbl.limiters {
 		if entry.lastAccess.Before(cutoff) {
 			delete(tbl.limiters, key)
@@ -124,13 +158,15 @@ type KeySource interface {
 }
 
 type RedisRateLimiter struct {
+	client *redisclient.ClientWrapper
 	name   string
 	limit  int
 	window time.Duration
 }
 
-func NewRedisRateLimiter(name string, limit int, window time.Duration) *RedisRateLimiter {
+func NewRedisRateLimiter(client *redisclient.ClientWrapper, name string, limit int, window time.Duration) *RedisRateLimiter {
 	return &RedisRateLimiter{
+		client: client,
 		name:   name,
 		limit:  limit,
 		window: window,
@@ -138,9 +174,10 @@ func NewRedisRateLimiter(name string, limit int, window time.Duration) *RedisRat
 }
 
 func (rrl *RedisRateLimiter) Allow(ctx context.Context, key string) (bool, error) {
-	redisKey := redisclient.BuildKey("ratelimit:", rrl.name, ":", key)
+	client := rrl.client.Client()
+	redisKey := rrl.client.BuildKey("ratelimit:", rrl.name, ":", key)
 
-	pipe := redisclient.GetClient().Pipeline()
+	pipe := client.Pipeline()
 	incr := pipe.Incr(ctx, redisKey)
 	pipe.Expire(ctx, redisKey, rrl.window)
 
@@ -157,12 +194,12 @@ type TotalLimiter interface {
 	Drop(ctx context.Context, key string) error
 }
 
-func NewTotalLimiter(name string, max int64) TotalLimiter {
-	switch limiterStorageType {
-	case MEMORY:
-		return NewTokenBucketTotalLimiter(name, max)
-	case REDIS:
-		return NewRedisTotalLimiter(name, max)
+func (f *Factory) NewTotalLimiter(name string, max int64) TotalLimiter {
+	switch f.cfg.StorageType {
+	case storage.MemoryType:
+		return NewTokenBucketTotalLimiter(name, max, f.cfg.IdleTTL)
+	case storage.RedisType:
+		return NewRedisTotalLimiter(f.client, name, max)
 	}
 	panic("invalid storage type")
 }
@@ -177,15 +214,17 @@ type TokenBucketTotalLimiter struct {
 	mu       sync.Mutex
 	counters map[string]*counterEntry
 	max      int64
+	idleTTL  time.Duration
 }
 
-func NewTokenBucketTotalLimiter(name string, max int64) *TokenBucketTotalLimiter {
+func NewTokenBucketTotalLimiter(name string, max int64, idleTTL time.Duration) *TokenBucketTotalLimiter {
 	l := &TokenBucketTotalLimiter{
 		name:     name,
 		counters: make(map[string]*counterEntry),
 		max:      max,
+		idleTTL:  idleTTL,
 	}
-	startEvictionRoutine(name, func() { l.evictIdle() })
+	startEvictionRoutine(idleTTL, func() { l.evictIdle() })
 	return l
 }
 
@@ -217,7 +256,7 @@ func (l *TokenBucketTotalLimiter) evictIdle() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	cutoff := time.Now().Add(-idleTTL)
+	cutoff := time.Now().Add(-l.idleTTL)
 	for key, entry := range l.counters {
 		if entry.lastAccess.Before(cutoff) {
 			delete(l.counters, key)
@@ -233,14 +272,16 @@ func (l *TokenBucketTotalLimiter) Drop(ctx context.Context, key string) error {
 }
 
 type RedisTotalLimiter struct {
-	name string
-	max  int64
+	client *redisclient.ClientWrapper
+	name   string
+	max    int64
 }
 
-func NewRedisTotalLimiter(name string, max int64) *RedisTotalLimiter {
+func NewRedisTotalLimiter(client *redisclient.ClientWrapper, name string, max int64) *RedisTotalLimiter {
 	return &RedisTotalLimiter{
-		name: name,
-		max:  max,
+		client: client,
+		name:   name,
+		max:    max,
 	}
 }
 
@@ -249,9 +290,11 @@ func (l *RedisTotalLimiter) Allow(ctx context.Context, key string) (bool, error)
 		return true, nil
 	}
 
-	redisKey := redisclient.BuildKey("totallimit:", l.name, ":", key)
+	client := l.client.Client()
 
-	incr := redisclient.GetClient().Incr(ctx, redisKey)
+	redisKey := l.client.BuildKey("totallimit:", l.name, ":", key)
+
+	incr := client.Incr(ctx, redisKey)
 	if err := incr.Err(); err != nil {
 		return false, err
 	}
@@ -272,6 +315,8 @@ func (l *RedisTotalLimiter) Allow(ctx context.Context, key string) (bool, error)
 }
 
 func (l *RedisTotalLimiter) Drop(ctx context.Context, key string) error {
-	redisKey := redisclient.BuildKey("totallimit:", l.name, ":", key)
-	return redisclient.GetClient().Del(ctx, redisKey).Err()
+	client := l.client.Client()
+
+	redisKey := l.client.BuildKey("totallimit:", l.name, ":", key)
+	return client.Del(ctx, redisKey).Err()
 }

@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"proxylogin/internal/manager/common"
+	"proxylogin/internal/manager/config"
 	"proxylogin/internal/manager/server"
 	"sort"
 	"strings"
@@ -13,8 +16,14 @@ import (
 	"github.com/spf13/viper"
 )
 
+var version = "dev"
+var commit = "none"
+var buildDate = "unknown"
+
+var mustLoadEnvFile = false
+
 var rootCmd = &cobra.Command{
-	Use: "ProxyLogin",
+	Use: "proxylogin",
 }
 
 var serveCmd = &cobra.Command{
@@ -26,14 +35,21 @@ var serveCmd = &cobra.Command{
 	},
 }
 
-func loadViperConfig() error {
-	if err := viper.ReadInConfig(); err != nil {
-		var nf viper.ConfigFileNotFoundError
-		if !errors.As(err, &nf) {
-			return err
+// newViper reads ./config.* (if present) into a fresh viper instance with env overrides enabled.
+func newViper() (*viper.Viper, error) {
+	v := viper.New()
+
+	v.AddConfigPath(".")
+	v.SetConfigName("config")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+
+	if err := v.ReadInConfig(); err != nil {
+		if _, ok := errors.AsType[viper.ConfigFileNotFoundError](err); !ok {
+			return nil, err
 		}
 	}
-	return nil
+	return v, nil
 }
 
 var printConfigCmd = &cobra.Command{
@@ -41,18 +57,40 @@ var printConfigCmd = &cobra.Command{
 	Short: "Print the config",
 	Long:  "Print the config",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		err := loadViperConfig()
+		loadEnvFile()
+
+		v, err := newViper()
 		if err != nil {
 			return err
 		}
-		sortedKeys := sort.StringSlice(make([]string, 0, len(viper.AllKeys())))
-		sortedKeys = append(sortedKeys, viper.AllKeys()...)
+
+		binds, err := config.Prepare(v)
+		if err != nil {
+			return err
+		}
+
+		lcBinds := make(map[string]string)
+		for k, _ := range binds {
+			lcBinds[strings.ToLower(k)] = k
+		}
+
+		_, err = config.LoadConfig(v)
+		if err != nil {
+			return err
+		}
+
+		sortedKeys := sort.StringSlice(make([]string, 0, len(v.AllKeys())))
+		sortedKeys = append(sortedKeys, v.AllKeys()...)
 		sortedKeys.Sort()
 
-		rps := strings.NewReplacer(".", "_", "-", "_")
-
 		for _, key := range sortedKeys {
-			fmt.Printf("%s [%s]: %s\n", key, strings.ToUpper(rps.Replace(key)), viper.GetString(key))
+			nKey := lcBinds[key]
+			if envKey, ok := binds[nKey]; ok {
+				fmt.Printf("%s [%s]: %s\n", nKey, strings.ToUpper(envKey), v.GetString(key))
+			} else {
+				fmt.Printf("%s: %s\n", nKey, v.GetString(key))
+			}
+
 		}
 
 		return nil
@@ -60,6 +98,9 @@ var printConfigCmd = &cobra.Command{
 }
 
 func loadEnvFile() {
+	if !mustLoadEnvFile {
+		return
+	}
 	var err error
 
 	v := viper.New()
@@ -69,8 +110,7 @@ func loadEnvFile() {
 	v.SetConfigType("env")
 
 	if err = v.ReadInConfig(); err != nil {
-		var nf viper.ConfigFileNotFoundError
-		if !errors.As(err, &nf) {
+		if _, ok := errors.AsType[viper.ConfigFileNotFoundError](err); !ok {
 			log.Fatal(err)
 		}
 	}
@@ -83,25 +123,32 @@ func loadEnvFile() {
 }
 
 func init() {
-	loadEnvFile()
+	common.SetAppVersionInfo(version, commit, buildDate)
 
-	viper.AddConfigPath(".")
-	viper.SetConfigName("config")
-	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	viper.AutomaticEnv()
+	exeName, err := os.Executable()
+	if err == nil {
+		rootCmd.Use = filepath.Base(exeName)
+	}
 
+	rootCmd.PersistentFlags().BoolVarP(&mustLoadEnvFile, "env", "e", false, "load environment variables from .env file")
 	rootCmd.AddCommand(serveCmd)
-
 	rootCmd.AddCommand(printConfigCmd)
 }
 
 func run() error {
-	err := loadViperConfig()
+	loadEnvFile()
+
+	v, err := newViper()
 	if err != nil {
 		return err
 	}
 
-	return server.Run()
+	appConfig, err := config.LoadConfig(v)
+	if err != nil {
+		return err
+	}
+
+	return server.Run(appConfig)
 }
 
 func main() {

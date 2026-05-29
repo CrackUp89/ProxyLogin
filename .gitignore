@@ -32,3 +32,6 @@ go.work.sum
 /config.yaml
 
 tmp/
+
+# ZAP scan reports
+tests/zap-report/

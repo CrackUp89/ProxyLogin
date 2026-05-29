@@ -2,6 +2,8 @@ package masquerade
 
 import (
 	"proxylogin/internal/manager/logging"
+	"proxylogin/internal/manager/redisclient"
+	"proxylogin/internal/manager/storage"
 
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
@@ -16,20 +18,45 @@ func getMasqueradeLogger() *zap.Logger {
 	return masqueradeLogger
 }
 
-var keyLength int
-var unmaskRefreshToken bool
-
-func init() {
-	viper.SetDefault("masquerade.keyLength", 256)
-	viper.SetDefault("masquerade.unmaskRefreshToken", false)
+type Config struct {
+	KeyLength          int
+	UnmaskRefreshToken bool
 }
 
-func LoadConfig() {
-	keyLength = viper.GetInt("masquerade.keyLength")
-	unmaskRefreshToken = viper.GetBool("masquerade.unmaskRefreshToken")
-	createStorage()
+var EnvBinds = map[string]string{
+	"masquerade.keyLength":          "MASQUERADE_KEY_LENGTH",
+	"masquerade.unmaskRefreshToken": "MASQUERADE_UNMASK_REFRESH_TOKEN",
 }
 
-func UnmaskRefreshToken() bool {
-	return unmaskRefreshToken
+func SetDefaultConfig(v *viper.Viper) {
+	v.SetDefault("masquerade.keyLength", 256)
+	v.SetDefault("masquerade.unmaskRefreshToken", false)
+}
+
+func LoadConfig(v *viper.Viper) (Config, error) {
+	return Config{
+		KeyLength:          v.GetInt("masquerade.keyLength"),
+		UnmaskRefreshToken: v.GetBool("masquerade.unmaskRefreshToken"),
+	}, nil
+}
+
+type Masquerade struct {
+	cfg     Config
+	storage Storage
+}
+
+func New(cfg Config, storageType storage.Type, redisCfg redisclient.Config) (*Masquerade, error) {
+	s, err := newStorage(storageType, redisCfg)
+	if err != nil {
+		return nil, err
+	}
+	return &Masquerade{cfg: cfg, storage: s}, nil
+}
+
+func (m *Masquerade) Storage() Storage {
+	return m.storage
+}
+
+func (m *Masquerade) UnmaskRefreshToken() bool {
+	return m.cfg.UnmaskRefreshToken
 }

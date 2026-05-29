@@ -13,18 +13,24 @@ const (
 	RefreshTokenType TokenType = "refresh"
 )
 
+const (
+	DefaultInternalErrorCode = 100
+	DefaultAuthErrorCode     = 1000
+	DefaultBadRequestCode    = 2000
+)
+
 type AuthTokenSet struct {
-	AccessToken         string    `json:"access_token,omitempty" required:"true" doc:"Access token"`
-	AccessTokenExpires  time.Time `json:"access_token_expires,omitempty" required:"true"`
-	IdToken             string    `json:"id_token,omitempty" required:"true" doc:"Id token"`
-	IdTokenExpires      time.Time `json:"id_token_expires,omitempty" required:"true"`
-	RefreshToken        string    `json:"refresh_token,omitempty" doc:"Refresh token. Only sent if token refresh is enabled"`
-	RefreshTokenExpires time.Time `json:"refresh_token_expires_in,omitempty"`
+	AccessToken         string     `json:"access_token,omitempty" required:"true" doc:"Access token"`
+	AccessTokenExpires  *time.Time `json:"access_token_expires,omitempty" required:"true"`
+	IdToken             string     `json:"id_token,omitempty" required:"true" doc:"Id token"`
+	IdTokenExpires      *time.Time `json:"id_token_expires,omitempty" required:"true"`
+	RefreshToken        string     `json:"refresh_token,omitempty" doc:"Refresh token. Only sent if token refresh is enabled"`
+	RefreshTokenExpires *time.Time `json:"refresh_token_expires,omitempty"`
 }
 
 type MasqueradedToken struct {
 	Token        string    `json:"token,omitempty" doc:"A token that can be exchanged with this server to retrieve the access and id tokens"`
-	TokenExpires time.Time `json:"token_expires,omitempty" doc:"Expiration time of underlying access and id tokens"`
+	TokenExpires time.Time `json:"token_expires" doc:"Expiration time of underlying access and id tokens"`
 }
 
 type ErrorType string
@@ -43,249 +49,93 @@ type GenericError interface {
 	Type() ErrorType
 }
 
-type InternalError struct {
-	privateMessage string
-	originalError  error
-}
-
-func (e *InternalError) Code() int {
-	return 10000
-}
-
-func (e *InternalError) Error() string {
-	return "internal error"
-}
-
-func (e *InternalError) PrivateError() string {
-	if e.originalError != nil {
-		var ge GenericError
-		if errors.As(e.originalError, &ge) {
-			return e.privateMessage + "; " + e.originalError.Error() + "; " + ge.PrivateError()
-		}
-
-		return e.privateMessage + "; " + e.originalError.Error()
-	}
-	return e.privateMessage
-}
-
-func (e *InternalError) Type() ErrorType {
-	return InternalErrorType
-}
-
-func NewInternalError(privateMessage string, originalError error) *InternalError {
-	return &InternalError{privateMessage, originalError}
-}
-
-func WrapWithInternalError(err error) *InternalError {
-	return &InternalError{err.Error(), err}
-}
-
-type GenericAuthenticationError struct {
+type genericError struct {
 	privateMessage string
 	message        string
+	errorType      ErrorType
+	code           int
 	originalError  error
 }
 
-func (e *GenericAuthenticationError) Code() int {
-	return 1000
+func (g *genericError) Error() string {
+	return g.message
 }
 
-func (e *GenericAuthenticationError) Error() string {
-	return e.message
-}
-
-func (e *GenericAuthenticationError) PrivateError() string {
-	if e.originalError != nil {
-		var ge GenericError
-		if errors.As(e.originalError, &ge) {
-			return e.privateMessage + "; " + e.originalError.Error() + "; " + ge.PrivateError()
+func (g *genericError) PrivateError() string {
+	if g.originalError != nil {
+		if ge, ok := errors.AsType[GenericError](g.originalError); ok {
+			return g.privateMessage + "; " + g.originalError.Error() + "; " + ge.PrivateError()
 		}
 
-		return e.privateMessage + "; " + e.originalError.Error()
+		return g.privateMessage + "; " + g.originalError.Error()
 	}
-	return e.privateMessage
+	return g.privateMessage
 }
 
-func (e *GenericAuthenticationError) Type() ErrorType {
-	return AuthErrorType
+func (g *genericError) Code() int {
+	return g.code
 }
 
-func NewGenericAuthenticationError(privateMessage string, publicMessage string, originalError error) *GenericAuthenticationError {
-	return &GenericAuthenticationError{privateMessage, publicMessage, originalError}
+func (g *genericError) Type() ErrorType {
+	return g.errorType
 }
 
-type BadRequestError struct {
-	privateMessage string
-	message        string
-	originalError  error
-}
-
-func (e *BadRequestError) Code() int {
-	return 1001
-}
-
-func (e *BadRequestError) Error() string {
-	return e.message
-}
-
-func (e *BadRequestError) PrivateError() string {
-	if e.originalError != nil {
-		var ge GenericError
-		if errors.As(e.originalError, &ge) {
-			return e.privateMessage + "; " + e.originalError.Error() + "; " + ge.PrivateError()
-		}
-
-		return e.privateMessage + "; " + e.originalError.Error()
+func NewGenericError(privateMessage, message string, errorType ErrorType, code int, originalError error) GenericError {
+	return &genericError{
+		privateMessage: privateMessage,
+		message:        message,
+		errorType:      errorType,
+		code:           code,
+		originalError:  originalError,
 	}
-	return e.privateMessage
 }
 
-func (e *BadRequestError) Type() ErrorType {
-	return BadDataErrorType
+func NewInternalError(privateMessage string, originalError error) GenericError {
+	return NewGenericError(privateMessage, "internal error", InternalErrorType, 100, originalError)
 }
 
-func NewBadRequestError(privateMessage string, publicMessage string, originalError error) *BadRequestError {
-	return &BadRequestError{privateMessage, publicMessage, originalError}
+func NewGenericAuthError(privateMessage string, publicMessage string, originalError error) GenericError {
+	return NewGenericError(privateMessage, publicMessage, AuthErrorType, 1000, originalError)
 }
 
-type LoginSessionExpiredOrDoesNotExistError struct{}
-
-func (s *LoginSessionExpiredOrDoesNotExistError) Error() string {
-	return "Session expired or does not exist"
+func NewAuthError(privateMessage string, publicMessage string, code int, originalError error) GenericError {
+	return NewGenericError(privateMessage, publicMessage, AuthErrorType, code, originalError)
 }
 
-func (s *LoginSessionExpiredOrDoesNotExistError) PrivateError() string {
-	return "Session expired or does not exist"
+func NewGenericBadRequestError(privateMessage string, publicMessage string, originalError error) GenericError {
+	return NewGenericError(privateMessage, publicMessage, BadDataErrorType, 2000, originalError)
 }
 
-func (s *LoginSessionExpiredOrDoesNotExistError) Code() int {
-	return 1001
+func NewBadRequestError(privateMessage string, publicMessage string, code int, originalError error) GenericError {
+	return NewGenericError(privateMessage, publicMessage, BadDataErrorType, code, originalError)
 }
 
-func (s *LoginSessionExpiredOrDoesNotExistError) Type() ErrorType {
-	return BadDataErrorType
+func WrapWithInternalError(err error) GenericError {
+	return NewInternalError(err.Error(), err)
 }
 
-func NewLoginSessionExpiredOrDoesNotExistError() *LoginSessionExpiredOrDoesNotExistError {
-	return &LoginSessionExpiredOrDoesNotExistError{}
-}
+var GenericUnauthorizedError = NewGenericAuthError("unauthorized", "unauthorized", nil)
+var GenericInvalidUserOrPasswordError = NewGenericAuthError("invalid user or password", "invalid user or password", nil)
+var GenericInvalidVerificationCodeError = NewAuthError("session expired or does not exist", "session expired or does not exist", DefaultAuthErrorCode, nil)
+var GenericLoginSessionExpiredOrDoesNotExistError = NewAuthError("invalid login session", "invalid login session", DefaultAuthErrorCode, nil)
+var GenericInvalidMFACodeError = NewAuthError("invalid verification code", "invalid verification code", DefaultAuthErrorCode, nil)
+var GenericNoRefreshTokenError = NewGenericAuthError("unable to refresh tokens - no refresh token", "unauthorized", nil)
 
-type invalidUserOrPasswordError struct{}
+var GenericNoClaimsError = NewGenericAuthError("unable to extract token claims", "invalid token", nil)
+var GenericNoClientIdError = NewGenericAuthError("auth token has no client ID", "invalid token", nil)
+var GenericInvalidClientIdError = NewGenericAuthError("auth token has invalid client ID", "invalid token", nil)
+var GenericNoIssuerError = NewGenericAuthError("auth token has no issuer", "invalid token", nil)
+var GenericInvalidIssuerError = NewGenericAuthError("auth token has invalid issuer", "invalid token", nil)
 
-func (i invalidUserOrPasswordError) Error() string {
-	return "Invalid user or password"
-}
-
-func (i invalidUserOrPasswordError) PrivateError() string {
-	return "Invalid user or password"
-}
-
-func (i invalidUserOrPasswordError) Code() int {
-	return 1002
-}
-
-func (i invalidUserOrPasswordError) Type() ErrorType {
-	return AuthErrorType
-}
-
-var InvalidUserOrPasswordError = invalidUserOrPasswordError{}
-
-type passwordHistoryError struct{}
-
-func (i passwordHistoryError) Error() string {
-	return "can not reuse password"
-}
-
-func (i passwordHistoryError) PrivateError() string {
-	return "can not reuse password"
-}
-
-func (i passwordHistoryError) Code() int {
-	return 1003
-}
-
-func (i passwordHistoryError) Type() ErrorType {
-	return BadDataErrorType
-}
-
-var PasswordHistoryError = passwordHistoryError{}
-
-type invalidNewPasswordError struct{}
-
-func (i invalidNewPasswordError) Error() string {
-	return "invalid new password"
-}
-
-func (i invalidNewPasswordError) PrivateError() string {
-	return "invalid new password"
-}
-
-func (i invalidNewPasswordError) Code() int {
-	return 1004
-}
-
-func (i invalidNewPasswordError) Type() ErrorType {
-	return BadDataErrorType
-}
-
-var InvalidNewPasswordError = invalidNewPasswordError{}
-
-type invalidVerificationCodeError struct{}
-
-func (i invalidVerificationCodeError) Error() string {
-	return "invalid verification code"
-}
-
-func (i invalidVerificationCodeError) PrivateError() string {
-	return "invalid verification code"
-}
-
-func (i invalidVerificationCodeError) Code() int {
-	return 1005
-}
-
-func (i invalidVerificationCodeError) Type() ErrorType {
-	return AuthErrorType
-}
-
-var InvalidVerificationCodeError = invalidVerificationCodeError{}
-
-type unauthorizedError struct{}
-
-func (i unauthorizedError) Error() string {
-	return "unauthorized"
-}
-
-func (i unauthorizedError) PrivateError() string {
-	return "unauthorized"
-}
-
-func (i unauthorizedError) Code() int {
-	return 1006
-}
-
-func (i unauthorizedError) Type() ErrorType {
-	return AuthErrorType
-}
-
-var UnauthorizedError = unauthorizedError{}
-
-type invalidTokenMaskError struct{}
-
-func (i invalidTokenMaskError) Error() string {
-	return "invalid token"
-}
-
-func (i invalidTokenMaskError) PrivateError() string {
-	return "invalid token mask"
-}
-
-func (i invalidTokenMaskError) Code() int {
-	return 1007
-}
-
-func (i invalidTokenMaskError) Type() ErrorType {
-	return AuthErrorType
-}
-
-var InvalidTokenMaskError = invalidTokenMaskError{}
+var GenericInvalidNewPasswordError = NewBadRequestError("invalid new password", "invalid new password", DefaultBadRequestCode, nil)
+var GenericPasswordHistoryError = NewBadRequestError("invalid new password", "invalid new password", DefaultBadRequestCode, nil)
+var GenericInvalidTokenMaskError = NewBadRequestError("invalid token mask", "invalid token", DefaultBadRequestCode, nil)
+var GenericMissingLoginSessionIdError = NewBadRequestError("missing login session id", "missing login session id", DefaultBadRequestCode, nil)
+var GenericMissingCSRFTokenError = NewBadRequestError("missing CSRF token", "missing CSRF token", DefaultBadRequestCode, nil)
+var GenericInvalidCSRFTokenError = NewBadRequestError("invalid CSRF token", "invalid CSRF token", DefaultBadRequestCode, nil)
+var GenericNoTokensProvidedError = NewBadRequestError("no tokens provided", "no tokens provided", DefaultBadRequestCode, nil)
+var GenericNoRefreshTokenProvidedError = NewBadRequestError("no refresh token provided", "no refresh token provided", DefaultBadRequestCode, nil)
+var GenericNoUserProvidedError = NewBadRequestError("no user provided", "no user provided", DefaultBadRequestCode, nil)
+var GenericNoIdTokenProvidedError = NewBadRequestError("no id token provided", "no id token provided", DefaultBadRequestCode, nil)
+var GenericInvalidEmailError = NewBadRequestError("invalid email address", "invalid email address", DefaultBadRequestCode, nil)
+var GenericUnsupportedMFAType = NewBadRequestError("unsupported MFA type", "unsupported MFA type", DefaultBadRequestCode, nil)

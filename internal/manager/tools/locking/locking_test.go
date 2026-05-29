@@ -2,6 +2,7 @@ package locking
 
 import (
 	"context"
+	"os"
 	"proxylogin/internal/manager/redisclient"
 	"proxylogin/internal/manager/tools"
 	"sync"
@@ -113,21 +114,33 @@ func TestLocalReturnOnce_Do(t *testing.T) {
 }
 
 func TestRedisReturnOnce_Do(t *testing.T) {
-	viper.SetDefault("redis.url", "redis://localhost:6389/0?protocol=3")
-	redisclient.LoadConfig()
+	redisUrl := os.Getenv("REDIS_URL")
+	if redisUrl == "" {
+		redisUrl = "redis://localhost:6389/0?protocol=3"
+	}
+
+	v := viper.New()
+	redisclient.SetDefaultConfig(v)
+	v.Set("redis.url", redisUrl)
+
+	redisCfg, err := redisclient.LoadConfig(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := redisclient.GetDefaultClient(redisCfg)
 
 	t.Run("success", func(t *testing.T) {
-		once := getRedisReturnOnce[string]("test", 10*time.Second)
+		once := getRedisReturnOnce[string](client, "test", 10*time.Second)
 		testSuccess(t, once)
 	})
 
 	t.Run("timeout", func(t *testing.T) {
-		once := getRedisReturnOnce[string]("test", 1*time.Second)
+		once := getRedisReturnOnce[string](client, "test", 1*time.Second)
 		testTimeout(t, once)
 	})
 
 	t.Run("panic", func(t *testing.T) {
-		once := getRedisReturnOnce[string]("test", 10*time.Second)
+		once := getRedisReturnOnce[string](client, "test", 10*time.Second)
 		testPanic(t, once)
 	})
 }

@@ -1,0 +1,21 @@
+### Validate the access token obtained from login
+# @name validate
+POST {{host}}/v1/validate
+Content-Type: application/json
+
+{
+  "tokens": {
+    "access": "{{access_token}}"
+  },
+  "return_errors": true,
+  "return_unauthorized": "any"
+}
+
+> {%
+  client.test("Validate returns 200", () => {
+    client.assert(response.status === 200, "Expected 200, got " + response.status);
+  });
+  client.test("Access token is valid", () => {
+    client.assert(response.body.tokens.access === true, "Expected access token to be valid");
+  });
+%}

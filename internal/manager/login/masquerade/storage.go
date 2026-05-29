@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"proxylogin/internal/manager/config"
+	"fmt"
 	"proxylogin/internal/manager/login/types"
 	"proxylogin/internal/manager/redisclient"
+	"proxylogin/internal/manager/storage"
 	"sync"
 	"time"
 
@@ -14,42 +15,39 @@ import (
 	"go.uber.org/zap"
 )
 
-var masqueradeStorage Storage
-
-func createStorage() {
-	switch config.GetStorageType() {
-	case config.MemoryStorageType:
-		masqueradeStorage = newLocalStorage()
-		startLocalStorageCleanupRoutine()
-		break
-	case config.RedisStorageType:
-		masqueradeStorage = newRedisStorage()
-		break
+func newStorage(storageType storage.Type, redisCfg redisclient.Config) (Storage, error) {
+	switch storageType {
+	case storage.MemoryType:
+		s := newLocalStorage()
+		s.startCleanupRoutine()
+		return s, nil
+	case storage.RedisType:
+		return newRedisStorage(redisclient.GetDefaultClient(redisCfg)), nil
 	default:
-		panic("invalid storage type")
+		return nil, fmt.Errorf("masquerade: invalid storage type: %q", storageType)
 	}
 }
 
-func cleanupExpiredTokens(storage *sync.Map) {
-	storage.Range(func(k, v interface{}) bool {
+func cleanupExpiredTokens(tokens *sync.Map) {
+	tokens.Range(func(k, v interface{}) bool {
 		session := v.(*localTokenRecord)
 		if !session.expires.IsZero() && session.expires.Before(time.Now()) {
 			getMasqueradeLogger().Info("token mask expired",
 				zap.String("session", k.(string)))
-			storage.Delete(k)
+			tokens.Delete(k)
 		}
 		return true
 	})
 }
 
-func startLocalStorageCleanupRoutine() func() {
+func (l *LocalMasqueradeStorage) startCleanupRoutine() func() {
 	stop := make(chan bool, 1)
 	go func() {
 		cleanup := time.NewTicker(15 * time.Second)
 		for {
 			select {
 			case <-cleanup.C:
-				cleanupExpiredTokens(masqueradeStorage.(*LocalMasqueradeStorage).tokens)
+				cleanupExpiredTokens(l.tokens)
 			case <-stop:
 				getMasqueradeLogger().Info("Token masquerade cleanup routine stopped")
 				return
@@ -113,19 +111,22 @@ func (l *LocalMasqueradeStorage) DropMasqueradedRecord(_ context.Context, key st
 	return nil
 }
 
-func newLocalStorage() Storage {
+func newLocalStorage() *LocalMasqueradeStorage {
 	return &LocalMasqueradeStorage{tokens: new(sync.Map)}
 }
 
 type RedisMasqueradeStorage struct {
+	client *redisclient.ClientWrapper
 }
 
 func (r RedisMasqueradeStorage) buildKey(key string) string {
-	return redisclient.BuildKey("tokenMasquerade:keys:", key)
+	return r.client.BuildKey("tokenMasquerade:keys:", key)
 }
 
 func (r RedisMasqueradeStorage) HasMasqueradedRecord(ctx context.Context, key string) (bool, error) {
-	if c, err := redisclient.GetClient().Exists(ctx, r.buildKey(key)).Result(); err != nil {
+	client := r.client.Client()
+
+	if c, err := client.Exists(ctx, r.buildKey(key)).Result(); err != nil {
 		getMasqueradeLogger().Error("failed search for token", zap.Error(err))
 		return false, err
 	} else {
@@ -145,7 +146,9 @@ func (r RedisMasqueradeStorage) StoreMasqueradedRecord(ctx context.Context, key 
 		ttl = time.Until(expires)
 	}
 
-	if err = redisclient.GetClient().Set(ctx, r.buildKey(key), data, ttl).Err(); err != nil {
+	client := r.client.Client()
+
+	if err = client.Set(ctx, r.buildKey(key), data, ttl).Err(); err != nil {
 		getMasqueradeLogger().Error("failed to store token", zap.Error(err))
 		return err
 	}
@@ -158,7 +161,9 @@ func (r RedisMasqueradeStorage) StoreMasqueradedRecord(ctx context.Context, key 
 }
 
 func (r RedisMasqueradeStorage) GetMasqueradedRecord(ctx context.Context, key string) (*MasqueradedRecord, error) {
-	data, err := redisclient.GetClient().Get(ctx, r.buildKey(key)).Result()
+	client := r.client.Client()
+
+	data, err := client.Get(ctx, r.buildKey(key)).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, nil
@@ -179,7 +184,9 @@ func (r RedisMasqueradeStorage) GetMasqueradedRecord(ctx context.Context, key st
 }
 
 func (r RedisMasqueradeStorage) DropMasqueradedRecord(ctx context.Context, key string) error {
-	if err := redisclient.GetClient().Del(ctx, r.buildKey(key)).Err(); err != nil {
+	client := r.client.Client()
+
+	if err := client.Del(ctx, r.buildKey(key)).Err(); err != nil {
 		getMasqueradeLogger().Error("failed to delete token from redis",
 			zap.String("key", key),
 			zap.Error(err))
@@ -192,10 +199,6 @@ func (r RedisMasqueradeStorage) DropMasqueradedRecord(ctx context.Context, key s
 	return nil
 }
 
-func newRedisStorage() Storage {
-	return &RedisMasqueradeStorage{}
-}
-
-func GetStorage() Storage {
-	return masqueradeStorage
+func newRedisStorage(client *redisclient.ClientWrapper) Storage {
+	return &RedisMasqueradeStorage{client: client}
 }

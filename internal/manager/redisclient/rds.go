@@ -9,48 +9,77 @@ import (
 	"github.com/spf13/viper"
 )
 
-var client *redis.Client
-var redisOptions *redis.Options
-var defaultKeyPrefix string
-
-func init() {
-	viper.SetDefault("redis.url", "redis://localhost:6379/0?protocol=3")
-	viper.SetDefault("redis.keyprefix", "proxylogin:")
-	viper.SetDefault("redis.clientname", "proxylogin")
-	viper.SetDefault("redis.connmaxlifetime", 180)
-	viper.SetDefault("redis.maxactiveconns", 500)
-	viper.SetDefault("redis.maxidleconns", 500)
+type Config struct {
+	DefaultRedisClientOptions *redis.Options
+	DefaultKeyPrefix          string
 }
 
-func LoadConfig() {
-	var err error
-	redisOptions, err = redis.ParseURL(viper.GetString("redis.url"))
+func SetDefaultConfig(v *viper.Viper) {
+	v.SetDefault("redis.url", "redis://localhost:6379/0?protocol=3")
+	v.SetDefault("redis.keyPrefix", "proxylogin:")
+	v.SetDefault("redis.clientName", "proxylogin")
+	v.SetDefault("redis.connectionMaxLifeTime", 180)
+	v.SetDefault("redis.maxActiveConnections", 500)
+	v.SetDefault("redis.maxIdleConnections", 500)
+}
+
+type ClientWrapper struct {
+	client    *redis.Client
+	keyPrefix string
+}
+
+var client *ClientWrapper
+
+var EnvBinds = map[string]string{
+	"redis.url":                   "REDIS_URL",
+	"redis.keyPrefix":             "REDIS_KEY",
+	"redis.clientName":            "REDIS_CLIENT_NAME",
+	"redis.connectionMaxLifeTime": "REDIS_CONNECTION_MAX_LIFETIME",
+	"redis.maxActiveConnections":  "REDIS_MAX_ACTIVE_CONNECTIONS",
+	"redis.maxIdleConnections":    "REDIS_MAX_IDLE_CONNECTIONS",
+}
+
+func LoadConfig(v *viper.Viper) (Config, error) {
+	r := Config{}
+
+	defaultRedisClientOptions, err := redis.ParseURL(v.GetString("redis.url"))
 	if err != nil {
-		panic(err)
+		return r, err
 	}
 
-	redisOptions.ClientName = viper.GetString("redis.clientname")
-	redisOptions.ConnMaxLifetime = viper.GetDuration("redis.connmaxlifetime") * time.Second
-	redisOptions.MaxActiveConns = viper.GetInt("redis.maxactiveconns")
-	redisOptions.MaxIdleConns = viper.GetInt("redis.maxidleconns")
+	defaultRedisClientOptions.ClientName = v.GetString("redis.clientName")
+	defaultRedisClientOptions.ConnMaxLifetime = v.GetDuration("redis.connectionMaxLifeTime") * time.Second
+	defaultRedisClientOptions.MaxActiveConns = v.GetInt("redis.maxActiveConnections")
+	defaultRedisClientOptions.MaxIdleConns = v.GetInt("redis.maxIdleConnections")
 
-	defaultKeyPrefix = viper.GetString("redis.keyprefix")
+	r.DefaultRedisClientOptions = defaultRedisClientOptions
+
+	r.DefaultKeyPrefix = v.GetString("redis.keyPrefix")
+
+	return r, nil
 }
 
 var clientOnce = &sync.Once{}
 
-func GetClient() *redis.Client {
+func GetDefaultClient(cfg Config) *ClientWrapper {
 	clientOnce.Do(func() {
-		client = redis.NewClient(redisOptions)
+		client = &ClientWrapper{
+			client:    redis.NewClient(cfg.DefaultRedisClientOptions),
+			keyPrefix: cfg.DefaultKeyPrefix,
+		}
 	})
 	return client
 }
 
-func BuildKey(parts ...string) string {
+func (c *ClientWrapper) BuildKey(parts ...string) string {
 	sb := strings.Builder{}
-	sb.WriteString(defaultKeyPrefix)
+	sb.WriteString(c.keyPrefix)
 	for _, part := range parts {
 		sb.WriteString(part)
 	}
 	return sb.String()
+}
+
+func (c *ClientWrapper) Client() *redis.Client {
+	return c.client
 }

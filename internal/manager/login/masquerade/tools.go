@@ -5,13 +5,16 @@ import (
 	"proxylogin/internal/manager/tools"
 )
 
-func GetNewKey(ctx context.Context) (string, error) {
+func (m *Masquerade) GetNewKey(ctx context.Context) (string, error) {
 	for {
-		key := tools.GenerateRandomString(keyLength)
+		key, err := tools.GenerateRandomString(m.cfg.KeyLength)
+		if err != nil {
+			return "", err
+		}
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		if ok, err := masqueradeStorage.HasMasqueradedRecord(ctx, key); err == nil && !ok {
+		if ok, err := m.storage.HasMasqueradedRecord(ctx, key); err == nil && !ok {
 			return key, nil
 		} else if err != nil {
 			return "", err

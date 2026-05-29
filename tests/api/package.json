@@ -1,0 +1,12 @@
+{
+  "name": "proxylogin-tests",
+  "private": true,
+  "scripts": {
+    "scenario:basic-auth": "cd scenarios/01_basic_auth && bash run.sh",
+    "scenario:mfa-flow": "cd scenarios/02_mfa_flow && bash run.sh"
+  },
+  "dependencies": {
+    "httpyac": "^6.15.0",
+    "otpauth": "^9.4.0"
+  }
+}

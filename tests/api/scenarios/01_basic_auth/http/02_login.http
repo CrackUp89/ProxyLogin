@@ -1,0 +1,44 @@
+### Start a login session — returns the CSRF token and sets the session cookie
+# @name login-start
+POST {{host}}/v1/login/start
+
+> {%
+  client.test("Login start returns 200", () => {
+    client.assert(response.status === 200, "Expected 200, got " + response.status);
+  });
+  client.test("Response contains csrf_token", () => {
+    client.assert(response.body.csrf_token, "Missing csrf_token");
+  });
+  client.global.set("csrf_token", response.body.csrf_token);
+  // the login session id travels in the LS cookie and changes when a login succeeds
+  const setCookie = [].concat(response.headers.valuesOf ? response.headers.valuesOf("set-cookie") : response.headers.valueOf("set-cookie")).filter(Boolean);
+  const sessionCookie = setCookie.map(c => c.split(";")[0]).find(c => c.startsWith("LS="));
+  if (sessionCookie) client.global.set("session_cookie", sessionCookie);
+%}
+### Login with username + password
+# @name login
+POST {{host}}/v1/login
+Cookie: {{session_cookie}}
+X-CSRF-Auth-Token: {{csrf_token}}
+Content-Type: application/json
+
+{
+  "user": "{{username}}",
+  "password": "{{password}}",
+  "remember": false
+}
+
+> {%
+  client.test("Login returns 200", () => {
+    client.assert(response.status === 200, "Expected 200, got " + response.status);
+  });
+  client.test("Response contains token_set auth_result", () => {
+    client.assert(response.body.auth_result !== undefined, "Missing auth_result");
+    client.assert(response.body.auth_result.login_type === "token_set", "Expected login_type=token_set");
+    client.assert(response.body.auth_result.login_data.access_token !== undefined, "Missing access_token");
+    client.assert(response.body.auth_result.login_data.refresh_token !== undefined, "Missing refresh_token");
+  });
+  client.global.set("access_token", response.body.auth_result.login_data.access_token);
+  client.global.set("id_token", response.body.auth_result.login_data.id_token);
+  client.global.set("refresh_token", response.body.auth_result.login_data.refresh_token);
+%}
