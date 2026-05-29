@@ -65,12 +65,16 @@ withCredentials([
         // Stage: Test
         // ----------------------------------------------------------
         stage('Test') {
-            docker.image(goImage).inside(goDockerArgs) {
-                sh 'go vet ./...'
-                sh 'go test -v -race -coverprofile=coverage.out ./...'
-                sh 'go tool cover -func=coverage.out'
+            withEnv([
+                "CGO_ENABLED=1"
+            ]) {
+                docker.image(goImage).inside(goDockerArgs) {
+                    sh 'go vet ./...'
+                    sh 'go test -v -race -coverprofile=coverage.out ./...'
+                    sh 'go tool cover -func=coverage.out'
+                }
+                junit allowEmptyResults: true, testResults: '**/test-report.xml'
             }
-            junit allowEmptyResults: true, testResults: '**/test-report.xml'
         }
 
         // ----------------------------------------------------------
