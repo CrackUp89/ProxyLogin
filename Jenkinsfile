@@ -47,7 +47,7 @@ withCredentials([
         def appName        = 'proxylogin'
         def goVersion      = '1.26'
         def goImage        = "golang:${goVersion}-alpine"
-        def goDockerArgs   = '-e CGO_ENABLED=0 -e GOCACHE=/tmp/go-cache -e GOMODCACHE=/tmp/go-mod'
+        def goDockerArgs   = '-e GOCACHE=/tmp/go-cache -e GOMODCACHE=/tmp/go-mod'
         def gitCommit = ''
         def gitTag    = ''
 
