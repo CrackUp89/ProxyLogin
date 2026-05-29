@@ -64,11 +64,11 @@ withCredentials([
         // Stage: Test
         // ----------------------------------------------------------
         stage('Test') {
-            //docker.image(goImage).inside('-e CGO_ENABLED=0') {
+            docker.image(goImage).inside('-e CGO_ENABLED=0') {
                 sh 'go vet ./...'
                 sh 'go test -v -race -coverprofile=coverage.out ./...'
                 sh 'go tool cover -func=coverage.out'
-            //}
+            }
             junit allowEmptyResults: true, testResults: '**/test-report.xml'
         }
 
@@ -87,7 +87,7 @@ withCredentials([
                     : "${appName}-${target.os}-${target.arch}${target.ext}"
 
                 buildSteps[label] = {
-                    //docker.image(goImage).inside('-e CGO_ENABLED=0') {
+                    docker.image(goImage).inside('-e CGO_ENABLED=0') {
                         withEnv([
                             "GOOS=${target.os}",
                             "GOARCH=${target.arch}",
@@ -106,7 +106,7 @@ withCredentials([
                                     ./cmd/${appName}
                             """
                         }
-                    //}
+                    }
                 }
             }
 
