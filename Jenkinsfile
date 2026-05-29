@@ -44,9 +44,10 @@ withCredentials([
 
     node(env.BUILD_NODE) {
 
-        def appName   = 'proxylogin'
-        def goVersion = '1.26'
-        def goImage   = "golang:${goVersion}-alpine"
+        def appName        = 'proxylogin'
+        def goVersion      = '1.26'
+        def goImage        = "golang:${goVersion}-alpine"
+        def goDockerArgs   = '-e CGO_ENABLED=0 -e GOCACHE=/tmp/go-cache -e GOMODCACHE=/tmp/go-mod'
         def gitCommit = ''
         def gitTag    = ''
 
@@ -64,7 +65,7 @@ withCredentials([
         // Stage: Test
         // ----------------------------------------------------------
         stage('Test') {
-            docker.image(goImage).inside('-e CGO_ENABLED=0') {
+            docker.image(goImage).inside(goDockerArgs) {
                 sh 'go vet ./...'
                 sh 'go test -v -race -coverprofile=coverage.out ./...'
                 sh 'go tool cover -func=coverage.out'
@@ -87,7 +88,7 @@ withCredentials([
                     : "${appName}-${target.os}-${target.arch}${target.ext}"
 
                 buildSteps[label] = {
-                    docker.image(goImage).inside('-e CGO_ENABLED=0') {
+                    docker.image(goImage).inside(goDockerArgs) {
                         withEnv([
                             "GOOS=${target.os}",
                             "GOARCH=${target.arch}",
