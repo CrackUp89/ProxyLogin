@@ -72,7 +72,7 @@ withCredentials([
 
             def networkName = "proxylogin_testing_${id}"
 
-            sh "docker network create -d bridge ${networkName} --internal"
+            sh "docker network create -d bridge ${networkName}"
 
             def redisContainer = docker.image(goImage).run("--network=${networkName} --hostname=redis")
 
@@ -81,7 +81,7 @@ withCredentials([
                 sh 'go test -v -coverprofile=coverage.out ./...'
                 sh 'go tool cover -func=coverage.out'
             }
-            
+
             redisContainer.stop()
 
             sh "docker network rm ${networkName}"
