@@ -119,15 +119,15 @@ func (r *RedisReturnOnce[T]) Key() string {
 }
 
 func getErrorKey(key string) string {
-	return redisclient.BuildKey("returnOnce:", key+".error")
+	return redisclient.GetDefaultClient().BuildKey("returnOnce:", key+".error")
 }
 
 func getResultKey(key string) string {
-	return redisclient.BuildKey("returnOnce:", key+".result")
+	return redisclient.GetDefaultClient().BuildKey("returnOnce:", key+".result")
 }
 
 func getLockKey(key string) string {
-	return redisclient.BuildKey("returnOnce:", key+".lock")
+	return redisclient.GetDefaultClient().BuildKey("returnOnce:", key+".lock")
 }
 
 func (r *RedisReturnOnce[T]) Do(ctx context.Context, f ReturnOnceFunc[T]) (T, error) {
@@ -140,7 +140,8 @@ func (r *RedisReturnOnce[T]) Do(ctx context.Context, f ReturnOnceFunc[T]) (T, er
 		resultKey := getResultKey(r.key)
 		errorKey := getErrorKey(r.key)
 
-		client := redisclient.GetClient()
+		clientWrapper := redisclient.GetDefaultClient()
+		client := clientWrapper.Client()
 
 		ps := client.Subscribe(ctx, resultKey, errorKey)
 		psResultChan := make(chan T, 1)

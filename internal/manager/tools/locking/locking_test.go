@@ -114,6 +114,7 @@ func TestLocalReturnOnce_Do(t *testing.T) {
 
 func TestRedisReturnOnce_Do(t *testing.T) {
 	viper.SetDefault("redis.url", "redis://localhost:6389/0?protocol=3")
+
 	redisclient.LoadConfig()
 
 	t.Run("success", func(t *testing.T) {

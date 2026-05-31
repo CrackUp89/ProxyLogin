@@ -138,9 +138,11 @@ func NewRedisRateLimiter(name string, limit int, window time.Duration) *RedisRat
 }
 
 func (rrl *RedisRateLimiter) Allow(ctx context.Context, key string) (bool, error) {
-	redisKey := redisclient.BuildKey("ratelimit:", rrl.name, ":", key)
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+	redisKey := clientWrapper.BuildKey("ratelimit:", rrl.name, ":", key)
 
-	pipe := redisclient.GetClient().Pipeline()
+	pipe := client.Pipeline()
 	incr := pipe.Incr(ctx, redisKey)
 	pipe.Expire(ctx, redisKey, rrl.window)
 
@@ -249,9 +251,12 @@ func (l *RedisTotalLimiter) Allow(ctx context.Context, key string) (bool, error)
 		return true, nil
 	}
 
-	redisKey := redisclient.BuildKey("totallimit:", l.name, ":", key)
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
 
-	incr := redisclient.GetClient().Incr(ctx, redisKey)
+	redisKey := clientWrapper.BuildKey("totallimit:", l.name, ":", key)
+
+	incr := client.Incr(ctx, redisKey)
 	if err := incr.Err(); err != nil {
 		return false, err
 	}
@@ -272,6 +277,9 @@ func (l *RedisTotalLimiter) Allow(ctx context.Context, key string) (bool, error)
 }
 
 func (l *RedisTotalLimiter) Drop(ctx context.Context, key string) error {
-	redisKey := redisclient.BuildKey("totallimit:", l.name, ":", key)
-	return redisclient.GetClient().Del(ctx, redisKey).Err()
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	redisKey := clientWrapper.BuildKey("totallimit:", l.name, ":", key)
+	return client.Del(ctx, redisKey).Err()
 }

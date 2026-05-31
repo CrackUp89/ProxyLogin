@@ -40,13 +40,12 @@ withCredentials([
         [os: 'freebsd', arch: 'arm64',  arm: '',  ext: ''],
     ]
 
-    def buildSteps = [:]
-
     node(env.BUILD_NODE) {
 
         def appName        = 'proxylogin'
         def goVersion      = '1.26'
         def goImage        = "golang:${goVersion}-alpine"
+        def redisImage     = "redis:8-alpine"
         def goDockerArgs   = '-e CGO_ENABLED=0 -e GOCACHE=/tmp/go-cache -e GOMODCACHE=/tmp/go-mod'
         def gitCommit = ''
         def gitTag    = ''
@@ -65,11 +64,28 @@ withCredentials([
         // Stage: Test
         // ----------------------------------------------------------
         stage('Test') {
-            docker.image(goImage).inside(goDockerArgs) {
+            def buildSteps = [:]
+            def infraReady = false
+            def testsDone = false
+
+            def id = "${gitCommit}_${env.BUILD_NUMBER}"
+
+            def networkName = "proxylogin_testing_${id}"
+
+            sh "docker network create -d bridge ${networkName} --internal"
+
+            def redisContainer = docker.image(goImage).run("--network=${networkName} --hostname=redis")
+
+            docker.image(goImage).inside("${goDockerArgs} --network=${networkName} -e REDIS_URL=redis://redis:6379/0?protocol=3") {
                 sh 'go vet ./...'
                 sh 'go test -v -coverprofile=coverage.out ./...'
                 sh 'go tool cover -func=coverage.out'
             }
+            
+            redisContainer.stop()
+
+            sh "docker network rm ${networkName}"
+
             junit allowEmptyResults: true, testResults: '**/test-report.xml'
         }
 
@@ -77,6 +93,8 @@ withCredentials([
         // Stage: Build (parallel cross-compilation)
         // ----------------------------------------------------------
         stage('Build') {
+            def buildSteps = [:]
+
             for (t in targets) {
                 def target = t   // capture loop variable for closure
 

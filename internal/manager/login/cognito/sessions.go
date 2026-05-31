@@ -314,8 +314,11 @@ func NewRedisSessionStore() *RedisSessionStore {
 //todo: move get\set\drop to generic funcs
 
 func (r *RedisSessionStore) GetConfirmPasswordResetSession(ctx context.Context, sessionKey string) (*ConfirmResetPasswordSession, error) {
-	key := redisclient.BuildKey(confirmPasswordResetSessionPrefix, sessionKey)
-	data, err := redisclient.GetClient().Get(ctx, key).Result()
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	key := clientWrapper.BuildKey(confirmPasswordResetSessionPrefix, sessionKey)
+	data, err := client.Get(ctx, key).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, nil
@@ -342,7 +345,10 @@ func (r *RedisSessionStore) GetConfirmPasswordResetSession(ctx context.Context, 
 }
 
 func (r *RedisSessionStore) CreateConfirmPasswordResetSession(ctx context.Context, sessionKey string, user string, expires time.Time) error {
-	key := redisclient.BuildKey(confirmPasswordResetSessionPrefix, sessionKey)
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	key := clientWrapper.BuildKey(confirmPasswordResetSessionPrefix, sessionKey)
 	session := &ConfirmResetPasswordSession{
 		User:    user,
 		Created: time.Now(),
@@ -362,7 +368,7 @@ func (r *RedisSessionStore) CreateConfirmPasswordResetSession(ctx context.Contex
 		ttl = 0
 	}
 
-	if err := redisclient.GetClient().Set(ctx, key, data, ttl).Err(); err != nil {
+	if err := client.Set(ctx, key, data, ttl).Err(); err != nil {
 		getSessionsLogger().Error("failed to create login session in redis",
 			zap.String("session", sessionKey),
 			zap.Error(err))
@@ -377,13 +383,19 @@ func (r *RedisSessionStore) CreateConfirmPasswordResetSession(ctx context.Contex
 }
 
 func (r *RedisSessionStore) DropConfirmPasswordResetSession(ctx context.Context, sessionKey string) error {
-	key := redisclient.BuildKey(confirmPasswordResetSessionPrefix, sessionKey)
-	return redisclient.GetClient().Del(ctx, key).Err()
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	key := clientWrapper.BuildKey(confirmPasswordResetSessionPrefix, sessionKey)
+	return client.Del(ctx, key).Err()
 }
 
 func (r *RedisSessionStore) GetMFAEnforcementSession(ctx context.Context, sessionKey string) (*MFAEnforcementSession, error) {
-	key := redisclient.BuildKey(mfaEnforcementSessionPrefix, sessionKey)
-	data, err := redisclient.GetClient().Get(ctx, key).Result()
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	key := clientWrapper.BuildKey(mfaEnforcementSessionPrefix, sessionKey)
+	data, err := client.Get(ctx, key).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, nil
@@ -410,7 +422,10 @@ func (r *RedisSessionStore) GetMFAEnforcementSession(ctx context.Context, sessio
 }
 
 func (r *RedisSessionStore) CreateMFAEnforcementSession(ctx context.Context, sessionKey string, rememberUser bool, authenticationResult *AuthenticationResult, expires time.Time) error {
-	key := redisclient.BuildKey(mfaEnforcementSessionPrefix, sessionKey)
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	key := clientWrapper.BuildKey(mfaEnforcementSessionPrefix, sessionKey)
 	session := &MFAEnforcementSession{
 		Created:              time.Now(),
 		Expires:              expires,
@@ -431,7 +446,7 @@ func (r *RedisSessionStore) CreateMFAEnforcementSession(ctx context.Context, ses
 		ttl = 0
 	}
 
-	if err := redisclient.GetClient().Set(ctx, key, data, ttl).Err(); err != nil {
+	if err := client.Set(ctx, key, data, ttl).Err(); err != nil {
 		getSessionsLogger().Error("failed to create MFA enforcement session in redis",
 			zap.String("session", sessionKey),
 			zap.Error(err))
@@ -446,13 +461,19 @@ func (r *RedisSessionStore) CreateMFAEnforcementSession(ctx context.Context, ses
 }
 
 func (r *RedisSessionStore) DropMFAEnforcementSession(ctx context.Context, sessionKey string) error {
-	key := redisclient.BuildKey(mfaEnforcementSessionPrefix, sessionKey)
-	return redisclient.GetClient().Del(ctx, key).Err()
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	key := clientWrapper.BuildKey(mfaEnforcementSessionPrefix, sessionKey)
+	return client.Del(ctx, key).Err()
 }
 
 func (r *RedisSessionStore) GetLoginSession(ctx context.Context, loginSession string) (*LoginSession, error) {
-	key := redisclient.BuildKey(loginSessionPrefix, loginSession)
-	data, err := redisclient.GetClient().Get(ctx, key).Result()
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	key := clientWrapper.BuildKey(loginSessionPrefix, loginSession)
+	data, err := client.Get(ctx, key).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, nil
@@ -479,7 +500,10 @@ func (r *RedisSessionStore) GetLoginSession(ctx context.Context, loginSession st
 }
 
 func (r *RedisSessionStore) CreateLoginSession(ctx context.Context, loginSessionKey string, cognitoSession string, nextStep NextStep, nextStepVariant NextStepVariant, rememberUser bool, expires time.Time, tag interface{}) error {
-	key := redisclient.BuildKey(loginSessionPrefix, loginSessionKey)
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	key := clientWrapper.BuildKey(loginSessionPrefix, loginSessionKey)
 	session := &LoginSession{
 		CognitoSession:  cognitoSession,
 		Created:         time.Now(),
@@ -503,7 +527,7 @@ func (r *RedisSessionStore) CreateLoginSession(ctx context.Context, loginSession
 		ttl = 0
 	}
 
-	if err := redisclient.GetClient().Set(ctx, key, data, ttl).Err(); err != nil {
+	if err := client.Set(ctx, key, data, ttl).Err(); err != nil {
 		getSessionsLogger().Error("failed to create login session in redis",
 			zap.String("session", loginSessionKey),
 			zap.Error(err))
@@ -518,13 +542,19 @@ func (r *RedisSessionStore) CreateLoginSession(ctx context.Context, loginSession
 }
 
 func (r *RedisSessionStore) DropLoginSession(ctx context.Context, loginSessionKey string) error {
-	key := redisclient.BuildKey(loginSessionPrefix, loginSessionKey)
-	return redisclient.GetClient().Del(ctx, key).Err()
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	key := clientWrapper.BuildKey(loginSessionPrefix, loginSessionKey)
+	return client.Del(ctx, key).Err()
 }
 
 func (r *RedisSessionStore) GetResetPasswordSession(ctx context.Context, token string) (*InitiateResetPasswordSession, error) {
-	key := redisclient.BuildKey(resetPasswordSessionPrefix, token)
-	data, err := redisclient.GetClient().Get(ctx, key).Result()
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	key := clientWrapper.BuildKey(resetPasswordSessionPrefix, token)
+	data, err := client.Get(ctx, key).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, nil
@@ -551,7 +581,10 @@ func (r *RedisSessionStore) GetResetPasswordSession(ctx context.Context, token s
 }
 
 func (r *RedisSessionStore) CreateResetPasswordSession(ctx context.Context, resetPasswordSessionKey string, user string, email string, expires time.Time) error {
-	key := redisclient.BuildKey(resetPasswordSessionPrefix, resetPasswordSessionKey)
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	key := clientWrapper.BuildKey(resetPasswordSessionPrefix, resetPasswordSessionKey)
 	session := &InitiateResetPasswordSession{
 		User:    user,
 		Email:   email,
@@ -572,7 +605,7 @@ func (r *RedisSessionStore) CreateResetPasswordSession(ctx context.Context, rese
 		ttl = 0
 	}
 
-	if err := redisclient.GetClient().Set(ctx, key, data, ttl).Err(); err != nil {
+	if err := client.Set(ctx, key, data, ttl).Err(); err != nil {
 		getSessionsLogger().Error("failed to create reset password session in redis",
 			zap.String("token", resetPasswordSessionKey),
 			zap.Error(err))
@@ -587,8 +620,11 @@ func (r *RedisSessionStore) CreateResetPasswordSession(ctx context.Context, rese
 }
 
 func (r *RedisSessionStore) DropResetPasswordSession(ctx context.Context, token string) error {
-	key := redisclient.BuildKey(resetPasswordSessionPrefix, token)
-	if err := redisclient.GetClient().Del(ctx, key).Err(); err != nil {
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	key := clientWrapper.BuildKey(resetPasswordSessionPrefix, token)
+	if err := client.Del(ctx, key).Err(); err != nil {
 		getSessionsLogger().Error("failed to delete reset password session from redis",
 			zap.String("token", token),
 			zap.Error(err))

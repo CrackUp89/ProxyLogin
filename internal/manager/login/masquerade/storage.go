@@ -121,11 +121,14 @@ type RedisMasqueradeStorage struct {
 }
 
 func (r RedisMasqueradeStorage) buildKey(key string) string {
-	return redisclient.BuildKey("tokenMasquerade:keys:", key)
+	return redisclient.GetDefaultClient().BuildKey("tokenMasquerade:keys:", key)
 }
 
 func (r RedisMasqueradeStorage) HasMasqueradedRecord(ctx context.Context, key string) (bool, error) {
-	if c, err := redisclient.GetClient().Exists(ctx, r.buildKey(key)).Result(); err != nil {
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	if c, err := client.Exists(ctx, r.buildKey(key)).Result(); err != nil {
 		getMasqueradeLogger().Error("failed search for token", zap.Error(err))
 		return false, err
 	} else {
@@ -145,7 +148,10 @@ func (r RedisMasqueradeStorage) StoreMasqueradedRecord(ctx context.Context, key 
 		ttl = time.Until(expires)
 	}
 
-	if err = redisclient.GetClient().Set(ctx, r.buildKey(key), data, ttl).Err(); err != nil {
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	if err = client.Set(ctx, r.buildKey(key), data, ttl).Err(); err != nil {
 		getMasqueradeLogger().Error("failed to store token", zap.Error(err))
 		return err
 	}
@@ -158,7 +164,10 @@ func (r RedisMasqueradeStorage) StoreMasqueradedRecord(ctx context.Context, key 
 }
 
 func (r RedisMasqueradeStorage) GetMasqueradedRecord(ctx context.Context, key string) (*MasqueradedRecord, error) {
-	data, err := redisclient.GetClient().Get(ctx, r.buildKey(key)).Result()
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	data, err := client.Get(ctx, r.buildKey(key)).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, nil
@@ -179,7 +188,10 @@ func (r RedisMasqueradeStorage) GetMasqueradedRecord(ctx context.Context, key st
 }
 
 func (r RedisMasqueradeStorage) DropMasqueradedRecord(ctx context.Context, key string) error {
-	if err := redisclient.GetClient().Del(ctx, r.buildKey(key)).Err(); err != nil {
+	clientWrapper := redisclient.GetDefaultClient()
+	client := clientWrapper.Client()
+
+	if err := client.Del(ctx, r.buildKey(key)).Err(); err != nil {
 		getMasqueradeLogger().Error("failed to delete token from redis",
 			zap.String("key", key),
 			zap.Error(err))

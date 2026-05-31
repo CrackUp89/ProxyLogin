@@ -9,8 +9,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-var client *redis.Client
-var redisOptions *redis.Options
+var defaultRedisClientOptions *redis.Options
 var defaultKeyPrefix string
 
 func init() {
@@ -22,35 +21,49 @@ func init() {
 	viper.SetDefault("redis.maxidleconns", 500)
 }
 
+type ClientWrapper struct {
+	client    *redis.Client
+	keyPrefix string
+}
+
+var client *ClientWrapper
+
 func LoadConfig() {
 	var err error
-	redisOptions, err = redis.ParseURL(viper.GetString("redis.url"))
+	defaultRedisClientOptions, err = redis.ParseURL(viper.GetString("redis.url"))
 	if err != nil {
 		panic(err)
 	}
 
-	redisOptions.ClientName = viper.GetString("redis.clientname")
-	redisOptions.ConnMaxLifetime = viper.GetDuration("redis.connmaxlifetime") * time.Second
-	redisOptions.MaxActiveConns = viper.GetInt("redis.maxactiveconns")
-	redisOptions.MaxIdleConns = viper.GetInt("redis.maxidleconns")
+	defaultRedisClientOptions.ClientName = viper.GetString("redis.clientname")
+	defaultRedisClientOptions.ConnMaxLifetime = viper.GetDuration("redis.connmaxlifetime") * time.Second
+	defaultRedisClientOptions.MaxActiveConns = viper.GetInt("redis.maxactiveconns")
+	defaultRedisClientOptions.MaxIdleConns = viper.GetInt("redis.maxidleconns")
 
 	defaultKeyPrefix = viper.GetString("redis.keyprefix")
 }
 
 var clientOnce = &sync.Once{}
 
-func GetClient() *redis.Client {
+func GetDefaultClient() *ClientWrapper {
 	clientOnce.Do(func() {
-		client = redis.NewClient(redisOptions)
+		client = &ClientWrapper{
+			client:    redis.NewClient(defaultRedisClientOptions),
+			keyPrefix: defaultKeyPrefix,
+		}
 	})
 	return client
 }
 
-func BuildKey(parts ...string) string {
+func (c *ClientWrapper) BuildKey(parts ...string) string {
 	sb := strings.Builder{}
-	sb.WriteString(defaultKeyPrefix)
+	sb.WriteString(c.keyPrefix)
 	for _, part := range parts {
 		sb.WriteString(part)
 	}
 	return sb.String()
+}
+
+func (c *ClientWrapper) Client() *redis.Client {
+	return c.client
 }
