@@ -74,7 +74,7 @@ withCredentials([
 
             sh "docker network create -d bridge ${networkName}"
 
-            def redisContainer = docker.image(goImage).run("--network=${networkName} --hostname=redis")
+            def redisContainer = docker.image(redisImage).run("--network=${networkName} --hostname=redis")
 
             docker.image(goImage).inside("${goDockerArgs} --network=${networkName} -e REDIS_URL=redis://redis:6379/0?protocol=3") {
                 sh 'go vet ./...'
