@@ -185,7 +185,7 @@ withCredentials([
                 def checksumPath = "dist/${folderName}/${generateChecksumFileName(target.os, target.arch, target.arm)}"
 
                 dir("dist/${folderName}") {
-                    zip zipFile:"${env.WORKSPACE}/dist/compressed/${archiveName}"
+                    zip(zipFile:"${env.WORKSPACE}/dist/compressed/${archiveName}")
                 }
 
                 sh """
