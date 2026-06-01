@@ -18,8 +18,8 @@ withCredentials([
     def targets = [
         // Windows
         [os: 'windows', arch: 'amd64',  arm: '',  ext: '.exe'],
-        [os: 'windows', arch: '386',    arm: '',  ext: '.exe'],
-
+//         [os: 'windows', arch: '386',    arm: '',  ext: '.exe'],
+//
 //         // Linux x86
 //         [os: 'linux',   arch: 'amd64',  arm: '',  ext: ''],
 //         [os: 'linux',   arch: '386',    arm: '',  ext: ''],
@@ -184,7 +184,9 @@ withCredentials([
                 def binaryName = generateBinaryName(target.ext)
                 def checksumPath = "dist/${folderName}/${generateChecksumFileName(target.os, target.arch, target.arm)}"
 
-                zip zipFile:"dist/compressed/${archiveName}", dir: "dist/${folderName}/"
+                dir("dist/${folderName}") {
+                    zip zipFile:"${env.WORKSPACE}/dist/compressed/${archiveName}"
+                }
 
                 sh """
                     sha256sum dist/${folderName}/${binaryName} > ${checksumPath}
