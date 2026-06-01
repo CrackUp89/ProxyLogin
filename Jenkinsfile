@@ -18,26 +18,26 @@ withCredentials([
     def targets = [
         // Windows
         [os: 'windows', arch: 'amd64',  arm: '',  ext: '.exe'],
-//         [os: 'windows', arch: '386',    arm: '',  ext: '.exe'],
-//
-//         // Linux x86
-//         [os: 'linux',   arch: 'amd64',  arm: '',  ext: ''],
-//         [os: 'linux',   arch: '386',    arm: '',  ext: ''],
-//
-//         // Linux ARM64 (modern ARM servers, Pi 4/5 64-bit)
-//         [os: 'linux',   arch: 'arm64',  arm: '',  ext: ''],
-//
-//         // Raspberry Pi — 32-bit (Pi Zero, Pi 1: ARMv6 / Pi 2+: ARMv7)
-//         [os: 'linux',   arch: 'arm',    arm: '6', ext: ''],
-//         [os: 'linux',   arch: 'arm',    arm: '7', ext: ''],
-//
-//         // macOS
-//         [os: 'darwin',  arch: 'amd64',  arm: '',  ext: ''],
-//         [os: 'darwin',  arch: 'arm64',  arm: '',  ext: ''],  // Apple Silicon
-//
-//         // FreeBSD
-//         [os: 'freebsd', arch: 'amd64',  arm: '',  ext: ''],
-//         [os: 'freebsd', arch: 'arm64',  arm: '',  ext: ''],
+        [os: 'windows', arch: '386',    arm: '',  ext: '.exe'],
+
+        // Linux x86
+        [os: 'linux',   arch: 'amd64',  arm: '',  ext: ''],
+        [os: 'linux',   arch: '386',    arm: '',  ext: ''],
+
+        // Linux ARM64 (modern ARM servers, Pi 4/5 64-bit)
+        [os: 'linux',   arch: 'arm64',  arm: '',  ext: ''],
+
+        // Raspberry Pi — 32-bit (Pi Zero, Pi 1: ARMv6 / Pi 2+: ARMv7)
+        [os: 'linux',   arch: 'arm',    arm: '6', ext: ''],
+        [os: 'linux',   arch: 'arm',    arm: '7', ext: ''],
+
+        // macOS
+        [os: 'darwin',  arch: 'amd64',  arm: '',  ext: ''],
+        [os: 'darwin',  arch: 'arm64',  arm: '',  ext: ''],  // Apple Silicon
+
+        // FreeBSD
+        [os: 'freebsd', arch: 'amd64',  arm: '',  ext: ''],
+        [os: 'freebsd', arch: 'arm64',  arm: '',  ext: ''],
     ]
 
     node(env.BUILD_NODE) {
@@ -187,7 +187,7 @@ withCredentials([
 
                 sh """
                     cd ${binFolderPath}
-                    zip ${archivePath} *
+                    zip -9 ${archivePath} *
                     sha256sum ${binaryName} > ${checksumPath}
                     echo >> ${checksumPath}
                     cd ${env.WORKSPACE}/dist/compressed
