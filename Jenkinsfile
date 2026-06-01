@@ -181,7 +181,8 @@ withCredentials([
             for (target in targets) {
                 def binFolderPath = "${env.WORKSPACE}/dist/${generateFolderName(target.os, target.arch, target.arm)}"
                 def binaryName = generateBinaryName(target.ext)
-                def archivePath = "${env.WORKSPACE}/dist/compressed/${generateArchiveName(target.os, target.arch, target.arm)}"
+                def archiveName = generateArchiveName(target.os, target.arch, target.arm)
+                def archivePath = "${env.WORKSPACE}/dist/compressed/${archiveName}"
                 def checksumPath = "${env.WORKSPACE}/dist/${generateChecksumFileName(target.os, target.arch, target.arm)}"
 
                 sh """
