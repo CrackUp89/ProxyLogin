@@ -180,18 +180,17 @@ withCredentials([
             sh "mkdir -p dist/compressed"
             for (target in targets) {
                 def archiveName = generateArchiveName(target.os, target.arch, target.arm)
-                def folderName = generateFolderName(target.os, target.arch, target.arm)
+                def binFolderPath = "${env.WORKSPACE}/dist/${generateFolderName(target.os, target.arch, target.arm)}"
                 def binaryName = generateBinaryName(target.ext)
-                def checksumPath = "dist/${folderName}/${generateChecksumFileName(target.os, target.arch, target.arm)}"
-
-                dir("dist/${folderName}") {
-                    zip(zipFile:"${env.WORKSPACE}/dist/compressed/${archiveName}")
-                }
+                def checksumPath = "${env.WORKSPACE}/dist/${folderName}/${generateChecksumFileName(target.os, target.arch, target.arm)}"
 
                 sh """
-                    sha256sum dist/${folderName}/${binaryName} > ${checksumPath}
+                    cd ${binFolderPath}
+                    sha256sum ${binaryName} > ${checksumPath}
+                    zip ${env.WORKSPACE}/dist/compressed/${archiveName} *
                     echo >> ${checksumPath}
-                    sha256sum dist/compressed/${archiveName} >> ${checksumPath}
+                    cd dist/compressed
+                    sha256sum ${archiveName} >> ${checksumPath}
                 """
             }
         }
