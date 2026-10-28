@@ -236,7 +236,7 @@ func enforceMFAAfterAuth[R any, PR interface {
 			NextStep:       nextStep,
 		}
 
-		nls.SetPayload(map[string]interface{}{
+		nls.SetPayload(map[string]any{
 			"available_mfa_methods": availableMethods,
 		})
 
@@ -268,6 +268,11 @@ func handleAuthResults[R any, PR interface {
 		if r := enforceMFAAfterAuth(c, ctx, csrfToken, loginSessionId, authResults, remember, nsf, ef, logger); r != nil {
 			return r
 		}
+	}
+
+	// login is complete, the login session is no longer needed
+	if err := c.dropLoginSession(ctx, loginSessionId); err != nil {
+		logger.Error("failed to drop login session", zap.String("loginSessionId", loginSessionId), zap.Error(err))
 	}
 
 	return handleFinalAuthResults(c, ctx, authResults, user, remember, rf, ef)
@@ -320,7 +325,7 @@ func handleChallenge[R any, PR interface {
 		LoginSessionId: loginSessionId,
 	}
 
-	var sessionTag interface{} = nil
+	var sessionTag any = nil
 	var nextStep NextStep
 
 	switch challenge {
@@ -328,7 +333,7 @@ func handleChallenge[R any, PR interface {
 		nextStep = NextStepMFASelect
 		v, ok := challengeParameters["MFAS_CAN_CHOOSE"]
 		if ok {
-			nls.SetPayload(map[string]interface{}{
+			nls.SetPayload(map[string]any{
 				"available_mfa_methods": mapMFAList(strings.Split(strings.Trim(v, "[]"), ",")),
 			})
 		} else {
@@ -339,7 +344,7 @@ func handleChallenge[R any, PR interface {
 		nextStep = NextStepMFASetup
 		v, ok := challengeParameters["MFAS_CAN_SETUP"]
 		if ok {
-			nls.SetPayload(map[string]interface{}{
+			nls.SetPayload(map[string]any{
 				"available_mfa_methods": mapMFAList(strings.Split(strings.Trim(v, "[]"), ",")),
 			})
 		} else {
@@ -359,7 +364,7 @@ func handleChallenge[R any, PR interface {
 		nextStep = NextStepNewPassword
 		v, ok := challengeParameters["requiredAttributes"]
 		if ok {
-			nls.SetPayload(map[string]interface{}{
+			nls.SetPayload(map[string]any{
 				"required": v,
 			})
 			sessionTag = v

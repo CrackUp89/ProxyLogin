@@ -17,11 +17,11 @@ type updateMFASoftwareTokenTaskResult struct {
 	payload *updateMFASoftwareTokenTaskResultPayload
 }
 
-func (u *updateMFASoftwareTokenTaskResult) GetPayload() interface{} {
+func (u *updateMFASoftwareTokenTaskResult) GetPayload() any {
 	return u.payload
 }
 
-func (u *updateMFASoftwareTokenTaskResult) SetPayload(_ interface{}) {
+func (u *updateMFASoftwareTokenTaskResult) SetPayload(_ any) {
 	panic("should not be called")
 }
 
@@ -29,6 +29,8 @@ type updateMFASoftwareTokenTaskResultChan chan *updateMFASoftwareTokenTaskResult
 
 type updateMFASoftwareTokenTask struct {
 	withAuth
+	withUpdateSession
+	withCSRFToken
 	Task[updateMFASoftwareTokenTaskResult, *updateMFASoftwareTokenTaskResult]
 }
 
@@ -36,12 +38,14 @@ func (t updateMFASoftwareTokenTask) Process(c *Cognito) {
 	t.ResultChan <- c.processUpdateMFASoftwareTokenTask(t)
 }
 
-func (c *Cognito) createUpdateMFASoftwareTokenTask(ctx context.Context, auth any) (updateMFASoftwareTokenTaskResultChan, loginTypes.GenericError) {
+func (c *Cognito) createUpdateMFASoftwareTokenTask(ctx context.Context, auth any, updateSessionId, csrfToken string) (updateMFASoftwareTokenTaskResultChan, loginTypes.GenericError) {
 	resultChan := make(updateMFASoftwareTokenTaskResultChan)
 	err := c.appendUpdateMFASoftwareTokenTask(updateMFASoftwareTokenTask{
-		Auth:       auth,
-		Context:    ctx,
-		ResultChan: resultChan,
+		Auth:            auth,
+		UpdateSessionId: updateSessionId,
+		CSRFToken:       csrfToken,
+		Context:         ctx,
+		ResultChan:      resultChan,
 	})
 	if err != nil {
 		return nil, err
@@ -52,7 +56,19 @@ func (c *Cognito) createUpdateMFASoftwareTokenTask(ctx context.Context, auth any
 func (c *Cognito) processUpdateMFASoftwareTokenTask(task updateMFASoftwareTokenTask) *updateMFASoftwareTokenTaskResult {
 	ef := genericTaskErrorFactory[updateMFASoftwareTokenTaskResult]
 
+	if r := checkTaskContext(task.Task, ef); r != nil {
+		return r
+	}
+
+	unlockSession := c.lockSession(task.UpdateSessionId)
+	defer unlockSession()
+
 	tokenSet, r := checkAuth(c, task.Task.Context, task.Auth, ef)
+	if r != nil {
+		return r
+	}
+
+	session, r := checkUpdateSession(c, task.Task.Context, task.UpdateSessionId, task.CSRFToken, tokenSet.AccessToken, UpdateStepMFASoftwareTokenUpdate, ef)
 	if r != nil {
 		return r
 	}
@@ -64,6 +80,11 @@ func (c *Cognito) processUpdateMFASoftwareTokenTask(task updateMFASoftwareTokenT
 	associateResult, err := c.cognitoClient.AssociateSoftwareToken(task.Context, associateInput)
 	if err != nil {
 		return ef(loginTypes.WrapWithInternalError(err))
+	}
+
+	if err := c.sessionStorage.CreateUpdateSession(task.Context, task.UpdateSessionId,
+		c.newUpdateSession(session.CSRFToken, session.Subject, UpdateStepMFASoftwareTokenUpdateVerify)); err != nil {
+		return ef(loginTypes.NewInternalError("failed to update update session", err))
 	}
 
 	return &updateMFASoftwareTokenTaskResult{

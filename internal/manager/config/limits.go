@@ -59,6 +59,10 @@ var defaultRateLimits = map[string][2]int{
 	"refreshTokensPerRemoteAddress": {60, 60},
 	"refreshTokensTotal":            {100, 1},
 
+	"passwordUpdateStartPerToken":         {5, 1},
+	"passwordUpdateStartPerRemoteAddress": {10, 60},
+	"passwordUpdateStartTotal":            {100, 1},
+
 	"passwordUpdatePerToken":         {5, 1},
 	"passwordUpdatePerRemoteAddress": {10, 60},
 	"passwordUpdateTotal":            {100, 1},
@@ -66,6 +70,10 @@ var defaultRateLimits = map[string][2]int{
 	"mfaStatusPerToken":         {10, 1},
 	"mfaStatusPerRemoteAddress": {600, 60},
 	"mfaStatusTotal":            {1000, 1},
+
+	"mfaSoftwareTokenUpdateStartPerToken":         {5, 1},
+	"mfaSoftwareTokenUpdateStartPerRemoteAddress": {10, 60},
+	"mfaSoftwareTokenUpdateStartTotal":            {100, 1},
 
 	"mfaSoftwareTokenUpdatePerToken":         {5, 1},
 	"mfaSoftwareTokenUpdatePerRemoteAddress": {10, 60},
@@ -102,6 +110,9 @@ var defaultRateLimits = map[string][2]int{
 	"loginExternalTokenPerCode":          {2, 1},
 	"loginExternalTokenPerRemoteAddress": {10, 60},
 	"loginExternalTokenTotal":            {100, 1},
+
+	"settingsPerRemoteAddress": {600, 60},
+	"settingsTotal":            {1000, 1},
 }
 
 var LimitsEnvBinds = buildLimitsEnvBinds()

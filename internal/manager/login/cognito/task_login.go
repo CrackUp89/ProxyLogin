@@ -53,7 +53,7 @@ func (c *Cognito) processLoginTask(task loginTask) *loginStepResult {
 
 	loginSessionId := task.LoginSessionId
 
-	unlockSession := c.lockLoginSession(loginSessionId)
+	unlockSession := c.lockSession(loginSessionId)
 	defer unlockSession()
 
 	requestLogger.Log(c.processingLogLevel, "processing", zap.String("loginSessionId", loginSessionId), zap.String("username", task.User))

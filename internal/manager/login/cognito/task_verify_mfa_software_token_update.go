@@ -2,12 +2,12 @@ package cognito
 
 import (
 	"context"
-	"errors"
 	loginTypes "proxylogin/internal/manager/login/types"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
 	cognitoTypes "github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider/types"
+	"go.uber.org/zap"
 )
 
 type verifyMFASoftwareTokenUpdateTaskResult struct {
@@ -19,6 +19,8 @@ type verifyMFASoftwareTokenUpdateTaskResultChan chan *verifyMFASoftwareTokenUpda
 type verifyMFASoftwareTokenUpdateTask struct {
 	Code string
 	withAuth
+	withUpdateSession
+	withCSRFToken
 	Task[verifyMFASoftwareTokenUpdateTaskResult, *verifyMFASoftwareTokenUpdateTaskResult]
 }
 
@@ -26,13 +28,15 @@ func (t verifyMFASoftwareTokenUpdateTask) Process(c *Cognito) {
 	t.ResultChan <- c.processVerifyMFASoftwareTokenUpdateTask(t)
 }
 
-func (c *Cognito) createVerifyMFASoftwareTokenUpdateTask(ctx context.Context, code string, auth any) (verifyMFASoftwareTokenUpdateTaskResultChan, loginTypes.GenericError) {
+func (c *Cognito) createVerifyMFASoftwareTokenUpdateTask(ctx context.Context, code string, auth any, updateSessionId, csrfToken string) (verifyMFASoftwareTokenUpdateTaskResultChan, loginTypes.GenericError) {
 	resultChan := make(verifyMFASoftwareTokenUpdateTaskResultChan)
 	err := c.appendVerifyMFASoftwareTokenUpdateTask(verifyMFASoftwareTokenUpdateTask{
-		Code:       code,
-		Auth:       auth,
-		Context:    ctx,
-		ResultChan: resultChan,
+		Code:            code,
+		Auth:            auth,
+		UpdateSessionId: updateSessionId,
+		CSRFToken:       csrfToken,
+		Context:         ctx,
+		ResultChan:      resultChan,
 	})
 	if err != nil {
 		return nil, err
@@ -43,8 +47,19 @@ func (c *Cognito) createVerifyMFASoftwareTokenUpdateTask(ctx context.Context, co
 func (c *Cognito) processVerifyMFASoftwareTokenUpdateTask(task verifyMFASoftwareTokenUpdateTask) *verifyMFASoftwareTokenUpdateTaskResult {
 	ef := genericTaskErrorFactory[verifyMFASoftwareTokenUpdateTaskResult]
 
+	if r := checkTaskContext(task.Task, ef); r != nil {
+		return r
+	}
+
+	unlockSession := c.lockSession(task.UpdateSessionId)
+	defer unlockSession()
+
 	tokenSet, r := checkAuth(c, task.Task.Context, task.Auth, ef)
 	if r != nil {
+		return r
+	}
+
+	if _, r := checkUpdateSession(c, task.Task.Context, task.UpdateSessionId, task.CSRFToken, tokenSet.AccessToken, UpdateStepMFASoftwareTokenUpdateVerify, ef); r != nil {
 		return r
 	}
 
@@ -56,8 +71,8 @@ func (c *Cognito) processVerifyMFASoftwareTokenUpdateTask(task verifyMFASoftware
 
 	result, err := c.cognitoClient.VerifySoftwareToken(task.Context, input)
 	if err != nil {
-		if _, errOk := errors.AsType[*cognitoTypes.EnableSoftwareTokenMFAException](err); errOk {
-			return ef(loginTypes.GenericInvalidMFACodeError)
+		if gErr := mapCodeVerificationError(err); gErr != nil {
+			return ef(gErr)
 		}
 		return ef(loginTypes.NewGenericAuthError("token verification error", "Authentication error", err))
 	}
@@ -68,6 +83,10 @@ func (c *Cognito) processVerifyMFASoftwareTokenUpdateTask(task verifyMFASoftware
 
 	if err := c.ensureMFAAfterUpdate(task.Context, tokenSet.AccessToken); err != nil {
 		return ef(loginTypes.NewInternalError("failed to enable software token MFA", err))
+	}
+
+	if err := c.sessionStorage.DropUpdateSession(task.Context, task.UpdateSessionId); err != nil {
+		getRequestLoggerFromTask(task.Task).Warn("failed to drop update session", zap.Error(err))
 	}
 
 	return &verifyMFASoftwareTokenUpdateTaskResult{}

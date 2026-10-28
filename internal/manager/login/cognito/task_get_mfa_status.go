@@ -12,11 +12,11 @@ type getMFAStatusTaskResult struct {
 	status *loginTypes.MFAStatus
 }
 
-func (g *getMFAStatusTaskResult) GetPayload() interface{} {
+func (g *getMFAStatusTaskResult) GetPayload() any {
 	return g.status
 }
 
-func (g *getMFAStatusTaskResult) SetPayload(_ interface{}) {
+func (g *getMFAStatusTaskResult) SetPayload(_ any) {
 	panic("should not be called")
 }
 
@@ -66,23 +66,19 @@ func (c *Cognito) processGetMFAStatusTask(task getMFAStatusTask) *getMFAStatusTa
 	}
 
 	status := &loginTypes.MFAStatus{
-		MFAMethods: []string{},
+		MFAMethods: []loginTypes.MFAType{},
 	}
 
 	if result.UserMFASettingList != nil {
 		status.MFAEnabled = len(result.UserMFASettingList) > 0
-		for _, mfa := range result.UserMFASettingList {
-			status.MFAMethods = append(status.MFAMethods, mfa)
-
-			if mfa == "EMAIL_OTP" {
+		status.MFAMethods = mapMFAList(result.UserMFASettingList)
+		for _, mfa := range status.MFAMethods {
+			switch mfa {
+			case loginTypes.MFATypeEMAIL:
 				status.EMAILConfigured = true
-			}
-
-			if mfa == "SOFTWARE_TOKEN_MFA" {
+			case loginTypes.MFATypeSoftwareToken:
 				status.TOTPConfigured = true
-			}
-
-			if mfa == "SMS_MFA" {
+			case loginTypes.MFATypeSMS:
 				status.SMSConfigured = true
 			}
 		}
@@ -93,7 +89,7 @@ func (c *Cognito) processGetMFAStatusTask(task getMFAStatusTask) *getMFAStatusTa
 	}
 
 	if result.PreferredMfaSetting != nil {
-		status.PreferredMFA = *result.PreferredMfaSetting
+		status.PreferredMFA = mfaMapping[*result.PreferredMfaSetting]
 	}
 
 	for _, attr := range result.UserAttributes {

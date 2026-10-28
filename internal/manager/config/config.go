@@ -25,6 +25,7 @@ type Config struct {
 	CookiesSecure              bool
 	CookieSameSite             http.SameSite
 	SessionCookieName          string
+	UpdateSessionCookieName    string
 	AccessTokenCookieName      string
 	IdTokenCookieName          string
 	RefreshTokenCookieName     string
@@ -42,19 +43,20 @@ type Config struct {
 }
 
 var EnvBinds = map[string]string{
-	"storage.type":                        "STORAGE_TYPE",
-	"token.masquerade":                    "TOKEN_MASQUERADE",
-	"token.cookies.enabled":               "TOKEN_COOKIES_ENABLED",
-	"token.cookies.httpOnly":              "TOKEN_COOKIES_HTTP_ONLY",
-	"token.cookies.domain":                "TOKEN_COOKIES_DOMAIN",
-	"token.cookies.path":                  "TOKEN_COOKIES_PATH",
-	"token.cookies.secure":                "TOKEN_COOKIES_SECURE",
-	"token.cookies.sameSite":              "TOKEN_COOKIES_SAME_SITE",
-	"token.cookies.sessionCookieName":     "TOKEN_COOKIES_SESSION_COOKIE_NAME",
-	"token.cookies.accessCookieName":      "TOKEN_COOKIES_ACCESS_COOKIE_NAME",
-	"token.cookies.idCookieName":          "TOKEN_COOKIES_ID_COOKIE_NAME",
-	"token.cookies.refreshCookieName":     "TOKEN_COOKIES_REFRESH_COOKIE_NAME",
-	"token.cookies.masqueradedCookieName": "TOKEN_COOKIES_MASQUADED_COOKIE_NAME",
+	"storage.type":                          "STORAGE_TYPE",
+	"token.masquerade":                      "TOKEN_MASQUERADE",
+	"token.cookies.enabled":                 "TOKEN_COOKIES_ENABLED",
+	"token.cookies.httpOnly":                "TOKEN_COOKIES_HTTP_ONLY",
+	"token.cookies.domain":                  "TOKEN_COOKIES_DOMAIN",
+	"token.cookies.path":                    "TOKEN_COOKIES_PATH",
+	"token.cookies.secure":                  "TOKEN_COOKIES_SECURE",
+	"token.cookies.sameSite":                "TOKEN_COOKIES_SAME_SITE",
+	"token.cookies.sessionCookieName":       "TOKEN_COOKIES_SESSION_COOKIE_NAME",
+	"token.cookies.updateSessionCookieName": "TOKEN_COOKIES_UPDATE_SESSION_COOKIE_NAME",
+	"token.cookies.accessCookieName":        "TOKEN_COOKIES_ACCESS_COOKIE_NAME",
+	"token.cookies.idCookieName":            "TOKEN_COOKIES_ID_COOKIE_NAME",
+	"token.cookies.refreshCookieName":       "TOKEN_COOKIES_REFRESH_COOKIE_NAME",
+	"token.cookies.masqueradedCookieName":   "TOKEN_COOKIES_MASQUADED_COOKIE_NAME",
 }
 
 func SetDefaultConfig(v *viper.Viper) {
@@ -67,6 +69,7 @@ func SetDefaultConfig(v *viper.Viper) {
 	v.SetDefault("token.cookies.secure", true)
 	v.SetDefault("token.cookies.sameSite", "")
 	v.SetDefault("token.cookies.sessionCookieName", "LS")
+	v.SetDefault("token.cookies.updateSessionCookieName", "US")
 	v.SetDefault("token.cookies.accessCookieName", "LATC")
 	v.SetDefault("token.cookies.idCookieName", "LITC")
 	v.SetDefault("token.cookies.refreshCookieName", "LRTC")
@@ -151,6 +154,7 @@ func LoadConfig(v *viper.Viper) (Config, error) {
 	r.CookiesSecure = v.GetBool("token.cookies.secure")
 
 	r.SessionCookieName = v.GetString("token.cookies.sessionCookieName")
+	r.UpdateSessionCookieName = v.GetString("token.cookies.updateSessionCookieName")
 	r.AccessTokenCookieName = v.GetString("token.cookies.accessCookieName")
 	r.IdTokenCookieName = v.GetString("token.cookies.idCookieName")
 	r.RefreshTokenCookieName = v.GetString("token.cookies.refreshCookieName")

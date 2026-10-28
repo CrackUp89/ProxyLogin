@@ -34,7 +34,7 @@ type LoginSession struct {
 	NextStep        NextStep        `json:"nextStep"`
 	NextStepVariant NextStepVariant `json:"nextStepVariant"`
 	RememberUser    bool            `json:"rememberUser"`
-	Tag             interface{}     `json:"tag"`
+	Tag             any             `json:"tag"`
 }
 
 func (l LoginSession) GetStartTime() time.Time {
@@ -91,7 +91,7 @@ func (l ConfirmResetPasswordSession) GetExpirationTime() time.Time {
 
 type SessionStorage interface {
 	GetLoginSession(ctx context.Context, id string) (*LoginSession, error)
-	CreateLoginSession(ctx context.Context, csrfToken, id, cognitoSession string, nextStep NextStep, nextStepVariant NextStepVariant, rememberUser bool, expires time.Time, tag interface{}) error
+	CreateLoginSession(ctx context.Context, csrfToken, id, cognitoSession string, nextStep NextStep, nextStepVariant NextStepVariant, rememberUser bool, expires time.Time, tag any) error
 	DropLoginSession(ctx context.Context, id string) error
 	HasLoginSession(ctx context.Context, id string) (bool, error)
 
@@ -106,6 +106,11 @@ type SessionStorage interface {
 	GetMFAEnforcementSession(ctx context.Context, id string) (*MFAEnforcementSession, error)
 	CreateMFAEnforcementSession(ctx context.Context, id string, rememberUser bool, authenticationResult *AuthenticationResult, expires time.Time) error
 	DropMFAEnforcementSession(ctx context.Context, id string) error
+
+	HasUpdateSession(ctx context.Context, id string) (bool, error)
+	GetUpdateSession(ctx context.Context, id string) (*UpdateSession, error)
+	CreateUpdateSession(ctx context.Context, id string, session *UpdateSession) error
+	DropUpdateSession(ctx context.Context, id string) error
 }
 
 func (c *Cognito) createSessionsStorage(storageType storage.Type, redisCfg redisclient.Config) error {
@@ -127,7 +132,7 @@ type withValidityTimeframe interface {
 }
 
 func cleanupExpiredSessions[T withValidityTimeframe](sessions *sync.Map) {
-	sessions.Range(func(k, v interface{}) bool {
+	sessions.Range(func(k, v any) bool {
 		session := v.(T)
 		if session.GetExpirationTime().Before(time.Now()) {
 			getSessionsLogger().Info("session expired",
@@ -150,6 +155,7 @@ func (c *Cognito) startLocalStorageCleanupRoutine() func() {
 				cleanupExpiredSessions[*InitiateResetPasswordSession](c.sessionStorage.(*LocalSessionStore).activeInitiateResetPasswordSessions)
 				cleanupExpiredSessions[*ConfirmResetPasswordSession](c.sessionStorage.(*LocalSessionStore).activeConfirmResetPasswordSessions)
 				cleanupExpiredSessions[*MFAEnforcementSession](c.sessionStorage.(*LocalSessionStore).activeMFAEnforcementSessions)
+				cleanupExpiredSessions[*UpdateSession](c.sessionStorage.(*LocalSessionStore).activeUpdateSessions)
 			case <-stop:
 				getSessionsLogger().Info("Session cleanup routine stopped")
 				return
@@ -161,7 +167,8 @@ func (c *Cognito) startLocalStorageCleanupRoutine() func() {
 	}
 }
 
-func (c *Cognito) lockLoginSession(id string) func() {
+// lockSession locks a login or update session by id. Session ids are random, so both kinds share one lock space.
+func (c *Cognito) lockSession(id string) func() {
 	if id == "" {
 		getSessionsLogger().Warn("can not lock session - session key is empty", zap.Stack("stack"))
 		return func() {
@@ -185,6 +192,7 @@ type LocalSessionStore struct {
 	activeInitiateResetPasswordSessions *sync.Map
 	activeConfirmResetPasswordSessions  *sync.Map
 	activeMFAEnforcementSessions        *sync.Map
+	activeUpdateSessions                *sync.Map
 }
 
 func (l *LocalSessionStore) GetConfirmPasswordResetSession(_ context.Context, key string) (*ConfirmResetPasswordSession, error) {
@@ -250,6 +258,7 @@ func NewLocalSessionStore() *LocalSessionStore {
 		activeInitiateResetPasswordSessions: new(sync.Map),
 		activeConfirmResetPasswordSessions:  new(sync.Map),
 		activeMFAEnforcementSessions:        new(sync.Map),
+		activeUpdateSessions:                new(sync.Map),
 	}
 }
 
@@ -269,7 +278,7 @@ func (l *LocalSessionStore) GetLoginSession(_ context.Context, loginSession stri
 	return nil, nil
 }
 
-func (l *LocalSessionStore) CreateLoginSession(_ context.Context, csrfToken, id, cognitoSession string, nextStep NextStep, nextStepVariant NextStepVariant, rememberUser bool, expires time.Time, tag interface{}) error {
+func (l *LocalSessionStore) CreateLoginSession(_ context.Context, csrfToken, id, cognitoSession string, nextStep NextStep, nextStepVariant NextStepVariant, rememberUser bool, expires time.Time, tag any) error {
 	l.activeLoginSessions.Store(id,
 		&LoginSession{
 			CognitoSession:  cognitoSession,
@@ -376,10 +385,7 @@ func (r *RedisSessionStore) CreateConfirmPasswordResetSession(ctx context.Contex
 		return err
 	}
 
-	ttl := time.Until(expires)
-	if ttl < 0 {
-		ttl = 0
-	}
+	ttl := max(time.Until(expires), 0)
 
 	if err := client.Set(ctx, key, data, ttl).Err(); err != nil {
 		getSessionsLogger().Error("failed to create login session in redis",
@@ -454,10 +460,7 @@ func (r *RedisSessionStore) CreateMFAEnforcementSession(ctx context.Context, id 
 		return err
 	}
 
-	ttl := time.Until(expires)
-	if ttl < 0 {
-		ttl = 0
-	}
+	ttl := max(time.Until(expires), 0)
 
 	if err := client.Set(ctx, key, data, ttl).Err(); err != nil {
 		getSessionsLogger().Error("failed to create MFA enforcement session in redis",
@@ -526,7 +529,7 @@ func (r *RedisSessionStore) GetLoginSession(ctx context.Context, loginSession st
 	return nil, nil
 }
 
-func (r *RedisSessionStore) CreateLoginSession(ctx context.Context, csrfToken, id, cognitoSession string, nextStep NextStep, nextStepVariant NextStepVariant, rememberUser bool, expires time.Time, tag interface{}) error {
+func (r *RedisSessionStore) CreateLoginSession(ctx context.Context, csrfToken, id, cognitoSession string, nextStep NextStep, nextStepVariant NextStepVariant, rememberUser bool, expires time.Time, tag any) error {
 	clientWrapper := r.client
 	client := clientWrapper.Client()
 
@@ -550,10 +553,7 @@ func (r *RedisSessionStore) CreateLoginSession(ctx context.Context, csrfToken, i
 		return err
 	}
 
-	ttl := time.Until(expires)
-	if ttl < 0 {
-		ttl = 0
-	}
+	ttl := max(time.Until(expires), 0)
 
 	if err := client.Set(ctx, key, data, ttl).Err(); err != nil {
 		getSessionsLogger().Error("failed to create login session in redis",
@@ -628,10 +628,7 @@ func (r *RedisSessionStore) CreateResetPasswordSession(ctx context.Context, id s
 		return err
 	}
 
-	ttl := time.Until(expires)
-	if ttl < 0 {
-		ttl = 0
-	}
+	ttl := max(time.Until(expires), 0)
 
 	if err := client.Set(ctx, key, data, ttl).Err(); err != nil {
 		getSessionsLogger().Error("failed to create reset password session in redis",
@@ -666,6 +663,15 @@ func (r *RedisSessionStore) DropResetPasswordSession(ctx context.Context, token 
 }
 
 func (c *Cognito) reserveNewLoginSessionId(ctx context.Context) (string, func(), loginTypes.GenericError) {
+	return c.reserveNewSessionId(ctx, c.sessionStorage.HasLoginSession)
+}
+
+func (c *Cognito) reserveNewUpdateSessionId(ctx context.Context) (string, func(), loginTypes.GenericError) {
+	return c.reserveNewSessionId(ctx, c.sessionStorage.HasUpdateSession)
+}
+
+// reserveNewSessionId generates an unused session id and returns it locked.
+func (c *Cognito) reserveNewSessionId(ctx context.Context, exists func(ctx context.Context, id string) (bool, error)) (string, func(), loginTypes.GenericError) {
 	var loginSessionId string
 	var unlockSession func()
 
@@ -675,8 +681,8 @@ func (c *Cognito) reserveNewLoginSessionId(ctx context.Context) (string, func(),
 		if err != nil {
 			return "", nil, loginTypes.NewInternalError("failed to generate new login session id", err)
 		}
-		unlockSession = c.lockLoginSession(loginSessionId)
-		exists, err := c.sessionStorage.HasLoginSession(ctx, loginSessionId)
+		unlockSession = c.lockSession(loginSessionId)
+		taken, err := exists(ctx, loginSessionId)
 		if err != nil {
 			unlockSession()
 			return "", nil, loginTypes.NewInternalError("failed to check if login session exists", err)
@@ -685,7 +691,7 @@ func (c *Cognito) reserveNewLoginSessionId(ctx context.Context) (string, func(),
 			unlockSession()
 			return "", nil, loginTypes.NewInternalError("failed to check if login session exists", err) //todo: maybe use another error
 		}
-		if exists {
+		if taken {
 			unlockSession()
 		} else {
 			break

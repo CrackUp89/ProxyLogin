@@ -96,7 +96,7 @@ func (c *Cognito) processInitiatePasswordResetTask(task initiatePasswordResetTas
 
 			resetLink := fmt.Sprintf("%s/password/reset?token=%s", c.appConfig.URLBase, token)
 
-			templateData := map[string]interface{}{
+			templateData := map[string]any{
 				"username":      *user.Username,
 				"resetLink":     resetLink,
 				"expiryMinutes": uint64(resetSettings.ValidFor.Minutes()),

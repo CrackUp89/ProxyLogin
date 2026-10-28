@@ -33,7 +33,7 @@ func (c *Cognito) startWorker() chan bool {
 
 func (c *Cognito) StartWorkers(num uint64) func() {
 	stopChannels := make([]chan bool, num)
-	for i := uint64(0); i < num; i++ {
+	for i := range num {
 		stopChannels[i] = c.startWorker()
 	}
 	getWorkersLogger().Info("Workers started", zap.Uint64("num", num))

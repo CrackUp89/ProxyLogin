@@ -190,12 +190,12 @@ type RequestInfo struct {
 
 type RequestTracker struct {
 	requests sync.Map
-	counter  int64
+	counter  atomic.Int64
 }
 
 func (rt *RequestTracker) RequestTrackerMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := atomic.AddInt64(&rt.counter, 1)
+		id := rt.counter.Add(1)
 
 		info := RequestInfo{
 			Method:    r.Method,
@@ -212,7 +212,7 @@ func (rt *RequestTracker) RequestTrackerMiddleware(next http.Handler) http.Handl
 
 func (rt *RequestTracker) GetActiveRequests() []RequestInfo {
 	var active []RequestInfo
-	rt.requests.Range(func(key, value interface{}) bool {
+	rt.requests.Range(func(key, value any) bool {
 		active = append(active, value.(RequestInfo))
 		return true
 	})

@@ -136,16 +136,28 @@ func (c *Cognito) createAuthCookie(name string, val string, expires time.Time) h
 
 func (c *Cognito) dropCookie(name string) http.Cookie {
 	return http.Cookie{
-		Name:    name,
-		Path:    c.appConfig.CookiesPath,
-		MaxAge:  -1,
-		Expires: time.Unix(0, 0),
+		Name:     name,
+		Path:     c.appConfig.CookiesPath,
+		Domain:   c.appConfig.CookiesDomain,
+		Secure:   c.appConfig.CookiesSecure,
+		SameSite: c.appConfig.CookieSameSite,
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
 	}
 }
 
 func (c *Cognito) createLoginSessionCookie(val string) http.Cookie {
 	//session cookie is always http-only
 	return c.createCookie(c.appConfig.SessionCookieName, val, true, time.Now().Add(c.loginSessionValidFor))
+}
+
+func (c *Cognito) createUpdateSessionCookie(val string) http.Cookie {
+	//session cookie is always http-only
+	return c.createCookie(c.appConfig.UpdateSessionCookieName, val, true, time.Now().Add(c.loginSessionValidFor))
+}
+
+func (c *Cognito) dropUpdateSessionCookie() http.Cookie {
+	return c.dropCookie(c.appConfig.UpdateSessionCookieName)
 }
 
 func (c *Cognito) dropLoginSessionCookie() http.Cookie {
@@ -172,8 +184,8 @@ func (c *Cognito) withAuthTokenContextMiddleware(ctx huma.Context, next func(hum
 		}
 	} else {
 		auth := ctx.Header("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") {
-			token := strings.TrimPrefix(auth, "Bearer ")
+		if after, ok := strings.CutPrefix(auth, "Bearer "); ok {
+			token := after
 			if c.appConfig.Masquerade {
 				rCtx = context.WithValue(rCtx, AuthContextVarName, MasqueradedAuth{Token: token})
 			} else {
@@ -221,6 +233,16 @@ func (c *Cognito) withLoginSessionMiddleware(ctx huma.Context, next func(huma.Co
 	val := readCookieFromHumaContext(ctx, c.appConfig.SessionCookieName)
 	if val != "" {
 		rCtx = context.WithValue(rCtx, LoginSessionContextVarName, val)
+	}
+	ctx = huma.WithContext(ctx, rCtx)
+	next(ctx)
+}
+
+func (c *Cognito) withUpdateSessionMiddleware(ctx huma.Context, next func(huma.Context)) {
+	rCtx := ctx.Context()
+	val := readCookieFromHumaContext(ctx, c.appConfig.UpdateSessionCookieName)
+	if val != "" {
+		rCtx = context.WithValue(rCtx, UpdateSessionContextVarName, val)
 	}
 	ctx = huma.WithContext(ctx, rCtx)
 	next(ctx)
@@ -302,6 +324,19 @@ func (c *Cognito) requireCSRFToken(ctx context.Context) (string, error) {
 		return "", humaTools.MapError(types.GenericMissingCSRFTokenError)
 	}
 	return csrfToken, nil
+}
+
+// requireUpdateSession returns the update session id and CSRF token sent with an update flow request.
+func (c *Cognito) requireUpdateSession(ctx context.Context) (string, string, error) {
+	updateSessionId := readStringFromContext(ctx, UpdateSessionContextVarName)
+	if updateSessionId == "" {
+		return "", "", humaTools.MapError(types.GenericMissingUpdateSessionIdError)
+	}
+	csrfToken, err := c.requireCSRFToken(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	return updateSessionId, csrfToken, nil
 }
 
 func getAuthFromContext(ctx context.Context) any {
@@ -476,6 +511,7 @@ func (c *Cognito) buildLoginTaskResponse(ctx context.Context, result LoginStepRe
 	}
 
 	if result.GetAuthResults() != nil {
+		// buildAuthResponse also clears the login session cookie
 		return processSideEffects(c, result.GetSideEffects(), c.buildAuthResponse(ctx, result)), nil
 	}
 
@@ -639,7 +675,7 @@ func (c *Cognito) registerValidate(api huma.API) {
 			"401": {
 				Content: map[string]*huma.MediaType{
 					"application/json": {
-						Schema: api.OpenAPI().Components.Schemas.Schema(reflect.TypeOf(TokenValidationTaskResponse{}), true, ""),
+						Schema: api.OpenAPI().Components.Schemas.Schema(reflect.TypeFor[TokenValidationTaskResponse](), true, ""),
 					},
 				},
 				Description: "Returned if any / all tokens are invalid when `return_unauthorized` is set to `any` / `all`",
@@ -1104,6 +1140,60 @@ func (c *Cognito) registerRefreshToken(api huma.API) {
 	})
 }
 
+// registerUpdateSessionStart registers the start endpoint of an authenticated update flow.
+// It opens an update session at the flow's first step, sets the session cookie and returns a CSRF token.
+func (c *Cognito) registerUpdateSessionStart(api huma.API, operationID, path, summary, description, limiterPrefix string, step UpdateStep) {
+	tokenLimiter := c.newRateLimiter(limiterPrefix + "PerToken")
+	addressLimiter := c.newRateLimiter(limiterPrefix + "PerRemoteAddress")
+	totalLimiter := c.newRateLimiter(limiterPrefix + "Total")
+
+	huma.Register(api, huma.Operation{
+		OperationID:  operationID,
+		Method:       http.MethodPost,
+		Path:         path,
+		Summary:      summary,
+		Description:  description,
+		MaxBodyBytes: 1024,
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, c.withAuthTokenContextMiddleware, c.withAllowedOriginMiddleware},
+	}, func(ctx context.Context, _ *struct{}) (*LoginStartResponseOutput, error) {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+
+		token := getAuthTokenFromContext(ctx)
+		if token == "" {
+			logError(types.GenericUnauthorizedError, ctx)
+			return nil, humaTools.MapError(types.GenericUnauthorizedError)
+		}
+
+		rm, _ := httpTools.GetRequestMetadataFromContext(ctx)
+		if err := newLimitValidator(ctx).
+			add(tokenLimiter, token).
+			add(addressLimiter, rm.GetClientIP()).
+			add(totalLimiter, "total").
+			validate(); err != nil {
+			return nil, err
+		}
+
+		trc, taskErr := c.createUpdateSessionStartTask(ctx, step, getAuthFromContext(ctx))
+		if taskErr != nil {
+			logError(taskErr, ctx)
+			return nil, humaTools.MapError(taskErr)
+		}
+
+		taskResult := <-trc
+
+		if taskError := taskResult.GetError(); taskError != nil {
+			logError(taskError, ctx)
+			return nil, humaTools.MapError(taskError)
+		}
+
+		return &LoginStartResponseOutput{
+			SetCookie: []http.Cookie{c.createUpdateSessionCookie(taskResult.UpdateSessionId)},
+			Body:      LoginStartResponseBody{CSRFToken: taskResult.CSRFToken},
+		}, nil
+	})
+}
+
 func (c *Cognito) registerUpdatePassword(api huma.API) {
 	tokenLimiter := c.newRateLimiter("passwordUpdatePerToken")
 	addressLimiter := c.newRateLimiter("passwordUpdatePerRemoteAddress")
@@ -1116,7 +1206,7 @@ func (c *Cognito) registerUpdatePassword(api huma.API) {
 		Summary:      "Update user password",
 		Description:  descPasswordUpdate,
 		MaxBodyBytes: 10 * 1024,
-		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, c.withAuthTokenContextMiddleware},
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, c.withAuthTokenContextMiddleware, c.withUpdateSessionMiddleware, c.withCSRFHeaderMiddleware, c.withAllowedOriginMiddleware},
 	}, func(ctx context.Context, input *UpdatePasswordInput) (*GenericTaskResponseOutput, error) {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
@@ -1136,13 +1226,23 @@ func (c *Cognito) registerUpdatePassword(api huma.API) {
 			return nil, err
 		}
 
-		trc, taskErr := c.createUpdatePasswordTask(ctx, input.Body.CurrentPassword, input.Body.NewPassword, getAuthFromContext(ctx))
+		updateSessionId, csrfToken, err := c.requireUpdateSession(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		trc, taskErr := c.createUpdatePasswordTask(ctx, input.Body.CurrentPassword, input.Body.NewPassword, getAuthFromContext(ctx), updateSessionId, csrfToken)
 		if taskErr != nil {
 			logError(taskErr, ctx)
 			return nil, humaTools.MapError(taskErr)
 		}
 
-		return c.buildTaskResponse(ctx, <-trc)
+		resp, err := c.buildTaskResponse(ctx, <-trc)
+		if err != nil {
+			return nil, err
+		}
+		resp.SetCookie = append(resp.SetCookie, c.dropUpdateSessionCookie())
+		return resp, nil
 	})
 }
 
@@ -1210,7 +1310,7 @@ func (c *Cognito) registerUpdateMFASoftwareToken(api huma.API) {
 		Summary:      "Initiate MFA software token update",
 		Description:  descMFASoftwareTokenUpdate,
 		MaxBodyBytes: 10 * 1024,
-		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, c.withAuthTokenContextMiddleware},
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, c.withAuthTokenContextMiddleware, c.withUpdateSessionMiddleware, c.withCSRFHeaderMiddleware, c.withAllowedOriginMiddleware},
 	}, func(ctx context.Context, _ *struct{}) (*TaskResponseOutput[*updateMFASoftwareTokenTaskResultPayload], error) {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
@@ -1230,7 +1330,12 @@ func (c *Cognito) registerUpdateMFASoftwareToken(api huma.API) {
 			return nil, err
 		}
 
-		trc, taskErr := c.createUpdateMFASoftwareTokenTask(ctx, getAuthFromContext(ctx))
+		updateSessionId, csrfToken, err := c.requireUpdateSession(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		trc, taskErr := c.createUpdateMFASoftwareTokenTask(ctx, getAuthFromContext(ctx), updateSessionId, csrfToken)
 		if taskErr != nil {
 			logError(taskErr, ctx)
 			return nil, humaTools.MapError(taskErr)
@@ -1262,8 +1367,8 @@ func (c *Cognito) registerVerifyUpdateMFASoftwareToken(api huma.API) {
 		Summary:      "Confirm MFA software token setup",
 		Description:  descMFASoftwareTokenUpdateVerify,
 		MaxBodyBytes: 10 * 1024,
-		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, c.withAuthTokenContextMiddleware},
-	}, func(ctx context.Context, input *VerifyMFASoftwareTokenUpdateInput) (*struct{}, error) {
+		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, c.withAuthTokenContextMiddleware, c.withUpdateSessionMiddleware, c.withCSRFHeaderMiddleware, c.withAllowedOriginMiddleware},
+	}, func(ctx context.Context, input *VerifyMFASoftwareTokenUpdateInput) (*SetCookieOutput, error) {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 
@@ -1282,7 +1387,12 @@ func (c *Cognito) registerVerifyUpdateMFASoftwareToken(api huma.API) {
 			return nil, err
 		}
 
-		trc, taskErr := c.createVerifyMFASoftwareTokenUpdateTask(ctx, input.Body.Code, getAuthFromContext(ctx))
+		updateSessionId, csrfToken, err := c.requireUpdateSession(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		trc, taskErr := c.createVerifyMFASoftwareTokenUpdateTask(ctx, input.Body.Code, getAuthFromContext(ctx), updateSessionId, csrfToken)
 		if taskErr != nil {
 			logError(taskErr, ctx)
 			return nil, humaTools.MapError(taskErr)
@@ -1296,7 +1406,7 @@ func (c *Cognito) registerVerifyUpdateMFASoftwareToken(api huma.API) {
 			return nil, humaTools.MapError(taskError)
 		}
 
-		return nil, nil
+		return &SetCookieOutput{SetCookie: []http.Cookie{c.dropUpdateSessionCookie()}}, nil
 	})
 }
 
@@ -1581,7 +1691,7 @@ func (c *Cognito) registerGetProfile(api huma.API) {
 			return nil, err
 		}
 
-		trc, taskErr := c.createGetProfileTask(ctx, getMasqueradedTokenFromContext(ctx), getIdTokenFromContext(ctx))
+		trc, taskErr := c.createGetProfileTask(ctx, getIdTokenFromContext(ctx), getAuthFromContext(ctx))
 		if taskErr != nil {
 			logError(taskErr, ctx)
 			return nil, humaTools.MapError(taskErr)
@@ -1610,7 +1720,7 @@ func (c *Cognito) registerExternalLoginRequest(api huma.API) {
 		OperationID:  "login-external-token",
 		Method:       http.MethodPost,
 		Path:         "/v1/login/external",
-		Summary:      "Login with external token",
+		Summary:      "Log in with an external authorization code",
 		Description:  descExternalLogin,
 		MaxBodyBytes: 1024,
 		Middlewares:  huma.Middlewares{withRequestLoggerMiddleware, c.withLoginSessionMiddleware, c.withCSRFHeaderMiddleware, c.withAllowedOriginMiddleware},
@@ -1672,9 +1782,13 @@ func (c *Cognito) AddRoutes(api huma.API) {
 	c.registerSatisfyPasswordUpdate(api)
 	c.registerLogout(api)
 
+	c.registerUpdateSessionStart(api, "password-update-start", "/v1/password/update/start",
+		"Start a password update", descPasswordUpdateStart, "passwordUpdateStart", UpdateStepPasswordUpdate)
 	c.registerUpdatePassword(api)
 
 	c.registerGetMFAStatus(api)
+	c.registerUpdateSessionStart(api, "mfa-software-token-update-start", "/v1/mfa/software/update/start",
+		"Start an MFA software token update", descMFASoftwareTokenUpdateStart, "mfaSoftwareTokenUpdateStart", UpdateStepMFASoftwareTokenUpdate)
 	c.registerUpdateMFASoftwareToken(api)
 	c.registerVerifyUpdateMFASoftwareToken(api)
 
@@ -1689,4 +1803,6 @@ func (c *Cognito) AddRoutes(api huma.API) {
 	c.registerGetProfile(api)
 
 	c.registerValidate(api)
+
+	c.registerGetSettings(api)
 }

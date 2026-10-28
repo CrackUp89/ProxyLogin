@@ -28,19 +28,19 @@ type withAuth struct {
 }
 
 type WithPayload interface {
-	GetPayload() interface{}
-	SetPayload(interface{})
+	GetPayload() any
+	SetPayload(any)
 }
 
 type withPayload struct {
-	Payload interface{} `json:"payload,omitempty"`
+	Payload any `json:"payload,omitempty"`
 }
 
-func (w *withPayload) GetPayload() interface{} {
+func (w *withPayload) GetPayload() any {
 	return w.Payload
 }
 
-func (w *withPayload) SetPayload(i interface{}) {
+func (w *withPayload) SetPayload(i any) {
 	w.Payload = i
 }
 
@@ -154,6 +154,7 @@ type taskWrapper struct {
 
 type taskAppenders struct {
 	appendLoginStartTask                   appenderFunc[loginStartTask]
+	appendUpdateSessionStartTask           appenderFunc[updateSessionStartTask]
 	appendLoginTask                        appenderFunc[loginTask]
 	appendExternalLoginTask                appenderFunc[externalLoginTask]
 	appendMFASetupTask                     appenderFunc[mfaSetupTask]
@@ -177,6 +178,7 @@ type taskAppenders struct {
 
 func (c *Cognito) initTaskAppenders() {
 	c.appendLoginStartTask, _ = newTaskAppendFunc[loginStartTask](c, 10000)
+	c.appendUpdateSessionStartTask, _ = newTaskAppendFunc[updateSessionStartTask](c, 1000)
 	c.appendLoginTask, _ = newTaskAppendFunc[loginTask](c, 10000)
 	c.appendExternalLoginTask, _ = newTaskAppendFunc[externalLoginTask](c, 10000)
 	c.appendMFASetupTask, _ = newTaskAppendFunc[mfaSetupTask](c, 1000)
@@ -236,7 +238,7 @@ type AuthChallengeTaskResult interface {
 	WithNextLoginStep
 }
 
-type AuthResultsData = interface{}
+type AuthResultsData = any
 
 type AuthResults interface {
 	GetAuthResultsData() AuthResultsData

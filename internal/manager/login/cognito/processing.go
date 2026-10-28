@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	loginTypes "proxylogin/internal/manager/login/types"
 	"proxylogin/internal/manager/tools"
 	"strings"
@@ -70,7 +71,23 @@ func getRequestLoggerFromTask[R any, PR interface {
 // todo: add sms
 var mfaMapping = map[string]loginTypes.MFAType{
 	"SOFTWARE_TOKEN_MFA": loginTypes.MFATypeSoftwareToken,
+	"SMS_MFA":            loginTypes.MFATypeSMS,
 	"EMAIL_OTP":          loginTypes.MFATypeEMAIL,
+}
+
+// mapCodeVerificationError maps Cognito's rejection of a one-time code (wrong, expired or already used)
+// to an invalid code error. It returns nil for any other error.
+func mapCodeVerificationError(err error) loginTypes.GenericError {
+	if _, ok := errors.AsType[*cognitoTypes.CodeMismatchException](err); ok {
+		return loginTypes.GenericInvalidMFACodeError
+	}
+	if _, ok := errors.AsType[*cognitoTypes.ExpiredCodeException](err); ok {
+		return loginTypes.GenericInvalidMFACodeError
+	}
+	if _, ok := errors.AsType[*cognitoTypes.EnableSoftwareTokenMFAException](err); ok {
+		return loginTypes.GenericInvalidMFACodeError
+	}
+	return nil
 }
 
 var reverseMFAMapping = tools.ReverseMap(mfaMapping)

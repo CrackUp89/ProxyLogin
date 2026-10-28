@@ -25,8 +25,7 @@ func loadEnvFile() {
 	v.SetConfigType("env")
 
 	if err = v.ReadInConfig(); err != nil {
-		var nf viper.ConfigFileNotFoundError
-		if !errors.As(err, &nf) {
+		if _, ok := errors.AsType[viper.ConfigFileNotFoundError](err); !ok {
 			log.Fatal(err)
 		}
 	}

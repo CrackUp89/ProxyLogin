@@ -46,6 +46,7 @@ withCredentials([
         def goVersion      = '1.27'
         def goImage        = "golang:${goVersion}-alpine"
         def redisImage     = "redis:8-alpine"
+        def govulncheckVersion = 'latest'
 
         def buildId = ''
         def volumeName = ''
@@ -120,7 +121,7 @@ withCredentials([
             // Stage: Test
             // ----------------------------------------------------------
             stage('Test') {
-                def buildSteps = [:]
+                def `buildSteps` = [:]
                 def infraReady = false
                 def testsDone = false
 
@@ -133,6 +134,16 @@ withCredentials([
                 }
 
                 redisContainer.stop()
+            }
+
+            // ----------------------------------------------------------
+            // Stage: Vulnerability check
+            // ----------------------------------------------------------
+            stage('Vulnerability Check') {
+                docker.image(goImage).inside("${goDockerArgs} -e GOBIN=/tmp/go-bin") {
+                    sh "go install golang.org/x/vuln/cmd/govulncheck@${govulncheckVersion}"
+                    sh '/tmp/go-bin/govulncheck ./...'
+                }
             }
 
             // ----------------------------------------------------------

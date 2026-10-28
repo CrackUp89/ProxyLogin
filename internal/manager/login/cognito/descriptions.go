@@ -35,6 +35,12 @@ var descRefreshTokens string
 //go:embed descriptions/password_update.md
 var descPasswordUpdate string
 
+//go:embed descriptions/password_update_start.md
+var descPasswordUpdateStart string
+
+//go:embed descriptions/mfa_software_token_update_start.md
+var descMFASoftwareTokenUpdateStart string
+
 //go:embed descriptions/mfa_status.md
 var descMFAStatus string
 
@@ -64,3 +70,6 @@ var descGetProfile string
 
 //go:embed descriptions/external_login.md
 var descExternalLogin string
+
+//go:embed descriptions/settings.md
+var descSettings string

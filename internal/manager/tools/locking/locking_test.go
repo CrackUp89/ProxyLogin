@@ -19,9 +19,8 @@ func testSuccess(t *testing.T, once ReturnOnce[string]) {
 	counter := int32(0)
 	results := make([]string, 0, 10)
 	errors := make([]error, 0, 10)
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
+	for range 10 {
+		wg.Go(func() {
 			r, err := once.Do(context.Background(), func(_ context.Context) (string, error) {
 				time.Sleep(1 * time.Second)
 				atomic.AddInt32(&counter, 1)
@@ -31,8 +30,7 @@ func testSuccess(t *testing.T, once ReturnOnce[string]) {
 			if err != nil {
 				errors = append(errors, err)
 			}
-			wg.Done()
-		}()
+		})
 	}
 	wg.Wait()
 	assert.Equal(t, int32(1), atomic.LoadInt32(&counter))
@@ -48,9 +46,8 @@ func testTimeout(t *testing.T, once ReturnOnce[string]) {
 	wg := &sync.WaitGroup{}
 	results := make([]string, 0, 10)
 	errors := make([]error, 0, 10)
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
+	for range 10 {
+		wg.Go(func() {
 			r, err := once.Do(context.Background(), func(_ context.Context) (string, error) {
 				time.Sleep(3 * time.Second)
 				return "should timeout", nil
@@ -60,8 +57,7 @@ func testTimeout(t *testing.T, once ReturnOnce[string]) {
 			} else {
 				results = append(results, r)
 			}
-			wg.Done()
-		}()
+		})
 	}
 	wg.Wait()
 	assert.Equal(t, 0, len(results))
@@ -72,9 +68,8 @@ func testPanic(t *testing.T, once ReturnOnce[string]) {
 	wg := &sync.WaitGroup{}
 	results := make([]string, 0, 10)
 	errors := make([]error, 0, 10)
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
+	for range 10 {
+		wg.Go(func() {
 			r, err := once.Do(context.Background(), func(_ context.Context) (string, error) {
 				time.Sleep(3 * time.Second)
 				panic("should panic")
@@ -84,8 +79,7 @@ func testPanic(t *testing.T, once ReturnOnce[string]) {
 			} else {
 				results = append(results, r)
 			}
-			wg.Done()
-		}()
+		})
 	}
 	wg.Wait()
 	assert.Equal(t, 0, len(results))

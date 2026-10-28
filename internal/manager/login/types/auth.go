@@ -24,13 +24,13 @@ type AuthTokenSet struct {
 	AccessTokenExpires  *time.Time `json:"access_token_expires,omitempty" required:"true"`
 	IdToken             string     `json:"id_token,omitempty" required:"true" doc:"Id token"`
 	IdTokenExpires      *time.Time `json:"id_token_expires,omitempty" required:"true"`
-	RefreshToken        string     `json:"refresh_token,omitempty" doc:"Refresh token. Only sent if token refresh is enabled"`
+	RefreshToken        string     `json:"refresh_token,omitempty" doc:"Refresh token. Not present after a token refresh unless Cognito refresh token rotation is enabled"`
 	RefreshTokenExpires *time.Time `json:"refresh_token_expires,omitempty"`
 }
 
 type MasqueradedToken struct {
-	Token        string    `json:"token,omitempty" doc:"A token that can be exchanged with this server to retrieve the access and id tokens"`
-	TokenExpires time.Time `json:"token_expires" doc:"Expiration time of underlying access and id tokens"`
+	Token        string    `json:"token,omitempty" doc:"Opaque token that a trusted service can exchange via /v1/unmask for the real tokens"`
+	TokenExpires time.Time `json:"token_expires" doc:"Expiration time of the masquerade token: the latest expiry of the underlying tokens"`
 }
 
 type ErrorType string
@@ -131,6 +131,8 @@ var GenericInvalidNewPasswordError = NewBadRequestError("invalid new password", 
 var GenericPasswordHistoryError = NewBadRequestError("invalid new password", "invalid new password", DefaultBadRequestCode, nil)
 var GenericInvalidTokenMaskError = NewBadRequestError("invalid token mask", "invalid token", DefaultBadRequestCode, nil)
 var GenericMissingLoginSessionIdError = NewBadRequestError("missing login session id", "missing login session id", DefaultBadRequestCode, nil)
+var GenericMissingUpdateSessionIdError = NewBadRequestError("missing update session id", "missing update session id", DefaultBadRequestCode, nil)
+var GenericUpdateSessionExpiredOrDoesNotExistError = NewAuthError("invalid update session", "invalid update session", DefaultAuthErrorCode, nil)
 var GenericMissingCSRFTokenError = NewBadRequestError("missing CSRF token", "missing CSRF token", DefaultBadRequestCode, nil)
 var GenericInvalidCSRFTokenError = NewBadRequestError("invalid CSRF token", "invalid CSRF token", DefaultBadRequestCode, nil)
 var GenericNoTokensProvidedError = NewBadRequestError("no tokens provided", "no tokens provided", DefaultBadRequestCode, nil)

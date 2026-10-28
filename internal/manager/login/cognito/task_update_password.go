@@ -6,6 +6,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
+	"go.uber.org/zap"
 )
 
 type updatePasswordTaskResult struct {
@@ -17,6 +18,8 @@ type updatePasswordTaskResultChan chan *updatePasswordTaskResult
 
 type updatePasswordTask struct {
 	withAuth
+	withUpdateSession
+	withCSRFToken
 	CurrentPassword string
 	NewPassword     string
 	Task[updatePasswordTaskResult, *updatePasswordTaskResult]
@@ -26,10 +29,12 @@ func (t updatePasswordTask) Process(c *Cognito) {
 	t.ResultChan <- c.processUpdatePasswordTask(t)
 }
 
-func (c *Cognito) createUpdatePasswordTask(ctx context.Context, currentPassword, newPassword string, auth any) (updatePasswordTaskResultChan, loginTypes.GenericError) {
+func (c *Cognito) createUpdatePasswordTask(ctx context.Context, currentPassword, newPassword string, auth any, updateSessionId, csrfToken string) (updatePasswordTaskResultChan, loginTypes.GenericError) {
 	resultChan := make(updatePasswordTaskResultChan)
 	err := c.appendUpdatePasswordTask(updatePasswordTask{
 		Auth:            auth,
+		UpdateSessionId: updateSessionId,
+		CSRFToken:       csrfToken,
 		CurrentPassword: currentPassword,
 		NewPassword:     newPassword,
 		Context:         ctx,
@@ -52,8 +57,15 @@ func (c *Cognito) processUpdatePasswordTask(task updatePasswordTask) *updatePass
 
 	requestLogger.Log(c.processingLogLevel, "processing")
 
+	unlockSession := c.lockSession(task.UpdateSessionId)
+	defer unlockSession()
+
 	tokenSet, r := checkAuth(c, task.Task.Context, task.Auth, ef)
 	if r != nil {
+		return r
+	}
+
+	if _, r := checkUpdateSession(c, task.Task.Context, task.UpdateSessionId, task.CSRFToken, tokenSet.AccessToken, UpdateStepPasswordUpdate, ef); r != nil {
 		return r
 	}
 
@@ -67,7 +79,10 @@ func (c *Cognito) processUpdatePasswordTask(task updatePasswordTask) *updatePass
 
 	if err != nil {
 		return ef(loginTypes.WrapWithInternalError(err))
+	}
 
+	if err := c.sessionStorage.DropUpdateSession(task.Context, task.UpdateSessionId); err != nil {
+		getRequestLoggerFromTask(task.Task).Warn("failed to drop update session", zap.Error(err))
 	}
 
 	return &updatePasswordTaskResult{}

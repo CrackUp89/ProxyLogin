@@ -52,7 +52,7 @@ func (c *Cognito) processMFAVerifyTask(task mfaVerifyTask) *mfaVerifyTaskResult 
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	unlockSession := c.lockLoginSession(task.LoginSessionId)
+	unlockSession := c.lockSession(task.LoginSessionId)
 	defer unlockSession()
 
 	if r := checkTaskContext(task.Task, ef); r != nil {
@@ -118,8 +118,8 @@ func (c *Cognito) verifyMFACode(session *LoginSession, task mfaVerifyTask, step 
 
 	result, err := c.cognitoClient.RespondToAuthChallenge(task.Context, challengeResp)
 	if err != nil {
-		if _, ok := errors.AsType[*cognitoTypes.CodeMismatchException](err); ok {
-			return ef(loginTypes.GenericInvalidMFACodeError)
+		if gErr := mapCodeVerificationError(err); gErr != nil {
+			return ef(gErr)
 		}
 		if _, ok := errors.AsType[*cognitoTypes.NotAuthorizedException](err); ok {
 			return ef(loginTypes.GenericUnauthorizedError)

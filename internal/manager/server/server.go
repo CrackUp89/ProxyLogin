@@ -184,7 +184,7 @@ func corsWithCSRFHeader(cfg config.CORSConfig, csrfHeader string) config.CORSCon
 	if csrfHeader == "" {
 		return cfg
 	}
-	for _, h := range strings.Split(cfg.AllowedHeaders, ",") {
+	for h := range strings.SplitSeq(cfg.AllowedHeaders, ",") {
 		if strings.EqualFold(strings.TrimSpace(h), csrfHeader) {
 			return cfg
 		}

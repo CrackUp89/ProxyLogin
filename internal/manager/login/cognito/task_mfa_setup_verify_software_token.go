@@ -2,7 +2,6 @@ package cognito
 
 import (
 	"context"
-	"errors"
 	loginTypes "proxylogin/internal/manager/login/types"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -52,7 +51,7 @@ func (c *Cognito) processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoft
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	unlockSession := c.lockLoginSession(task.LoginSessionId)
+	unlockSession := c.lockSession(task.LoginSessionId)
 	defer unlockSession()
 
 	requestLogger.Log(c.processingLogLevel, "processing", zap.String("loginSessionId", task.LoginSessionId), zap.String("username", task.User))
@@ -91,8 +90,8 @@ func (c *Cognito) processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoft
 
 	verifyResult, err := c.cognitoClient.VerifySoftwareToken(task.Context, verifyInput)
 	if err != nil {
-		if _, ok := errors.AsType[*cognitoTypes.EnableSoftwareTokenMFAException](err); ok {
-			return ef(loginTypes.GenericInvalidMFACodeError)
+		if gErr := mapCodeVerificationError(err); gErr != nil {
+			return ef(gErr)
 		}
 		return ef(loginTypes.WrapWithInternalError(err))
 	}
@@ -108,17 +107,17 @@ func (c *Cognito) processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoft
 			return ef(loginTypes.NewInternalError("failed to enable software token MFA", err))
 		}
 
-		if r := handleFinalAuthResults(c, task.Task.Context, mfaSession.AuthenticationResult,
-			task.User, session.RememberUser,
-			genericAuthResultFactory[mfaSetupVerifySoftwareTokenTaskResult], genericAuthErrorFactory[mfaSetupVerifySoftwareTokenTaskResult]); r != nil {
-			return r
-		}
-
+		// login is complete, the login and MFA enforcement sessions are no longer needed
 		if err := c.dropMFAEnforcementSession(task.Context, task.LoginSessionId); err != nil {
 			requestLogger.Error("failed to drop MFA enforcement session", zap.Error(err))
 		}
+		if err := c.dropLoginSession(task.Context, task.LoginSessionId); err != nil {
+			requestLogger.Error("failed to drop login session", zap.Error(err))
+		}
 
-		return ef(loginTypes.NewInternalError("no auth response", nil))
+		return handleFinalAuthResults(c, task.Task.Context, mfaSession.AuthenticationResult,
+			task.User, session.RememberUser,
+			genericAuthResultFactory[mfaSetupVerifySoftwareTokenTaskResult], genericAuthErrorFactory[mfaSetupVerifySoftwareTokenTaskResult])
 	}
 
 	challengeInput := &cognitoidentityprovider.RespondToAuthChallengeInput{

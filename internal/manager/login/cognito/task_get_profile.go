@@ -58,42 +58,28 @@ func (c *Cognito) processGetProfileTask(task getProfileTask) *getProfileTaskResu
 
 	requestLogger.Log(c.processingLogLevel, "processing")
 
-	var idToken string
-	if _, r := checkAuth(c, task.Context, task.Auth, ef); r != nil {
+	tokenSet, r := checkAuth(c, task.Context, task.Auth, ef)
+	if r != nil {
 		return r
 	}
 
-	switch task.Auth.(type) {
-	case TokenAuth:
+	// a masquerade token resolves to the full token set; otherwise the ID token comes from its cookie
+	idToken := tokenSet.IdToken
+	if idToken == "" {
 		idToken = task.IdToken
 	}
-
-	//if task.MasqueradedToken == "" {
-	//	if _, r := checkAuth(c, task.Task.Context, ef); r != nil {
-	//		return r
-	//	}
-	//	idToken = task.IdToken
-	//} else {
-	//	r, err := c.unmaskToken(task.Context, task.MasqueradedToken, requestLogger, true, c.masq.UnmaskRefreshToken())
-	//
-	//	if err != nil {
-	//		return ef(err)
-	//	}
-	//
-	//	if r := checkAuthToken(c, r.AccessToken, ef); r != nil {
-	//		return r
-	//	}
-	//
-	//	idToken = r.IdToken
-	//}
-
 	if idToken == "" {
 		return ef(loginTypes.GenericNoIdTokenProvidedError)
 	}
 
-	t, jwksErr := c.cognitoIdTokenToProfile(idToken)
+	subject, gErr := c.accessTokenSubject(tokenSet.AccessToken)
+	if gErr != nil {
+		return ef(gErr)
+	}
+
+	t, jwksErr := c.cognitoIdTokenToProfile(idToken, subject)
 	if jwksErr != nil {
-		return ef(loginTypes.NewInternalError("jwks error", jwksErr))
+		return ef(loginTypes.NewGenericAuthError("invalid id token", "invalid token", jwksErr))
 	}
 
 	return &getProfileTaskResult{
@@ -101,7 +87,8 @@ func (c *Cognito) processGetProfileTask(task getProfileTask) *getProfileTaskResu
 	}
 }
 
-func (c *Cognito) cognitoIdTokenToProfile(token string) (*UserIdTokenProfile, error) {
+// cognitoIdTokenToProfile validates an ID token, checks that it belongs to subject and decodes the profile from it.
+func (c *Cognito) cognitoIdTokenToProfile(token, subject string) (*UserIdTokenProfile, error) {
 	t, err := c.jwksValidator.ValidateToken(token)
 	if err != nil {
 		return nil, err
@@ -112,9 +99,13 @@ func (c *Cognito) cognitoIdTokenToProfile(token string) (*UserIdTokenProfile, er
 		return nil, errors.New("invalid token")
 	}
 
-	var groups []string
+	if sub, _ := claimsMap["sub"].(string); sub != subject {
+		return nil, errors.New("id token does not belong to the authenticated user")
+	}
 
-	if g, ok := claimsMap["cognito:groups"].([]interface{}); ok {
+	groups := []string{}
+
+	if g, ok := claimsMap["cognito:groups"].([]any); ok {
 		for _, gn := range g {
 			if gn, ok := gn.(string); ok {
 				groups = append(groups, gn)

@@ -23,11 +23,12 @@ import (
 )
 
 const (
-	AuthContextVarName         = "cognito_auth"
-	IdTokenContextVarName      = "cognito_id"
-	RefreshTokenContextVarName = "refresh_id"
-	LoginSessionContextVarName = "login_session_id"
-	CSRFTokenContextVarName    = "csrf_token"
+	AuthContextVarName          = "cognito_auth"
+	IdTokenContextVarName       = "cognito_id"
+	RefreshTokenContextVarName  = "refresh_id"
+	LoginSessionContextVarName  = "login_session_id"
+	CSRFTokenContextVarName     = "csrf_token"
+	UpdateSessionContextVarName = "update_session_id"
 )
 
 var cognitoLogger *zap.Logger

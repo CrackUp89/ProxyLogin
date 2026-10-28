@@ -55,7 +55,7 @@ func (c *Cognito) processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUp
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	unlockSession := c.lockLoginSession(task.LoginSessionId)
+	unlockSession := c.lockSession(task.LoginSessionId)
 	defer unlockSession()
 
 	requestLogger.Log(c.processingLogLevel, "processing", zap.String("loginSessionId", task.LoginSessionId), zap.String("username", task.User))

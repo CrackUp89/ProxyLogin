@@ -51,7 +51,7 @@ func (c *Cognito) processMFASetupTask(task mfaSetupTask) *mfaSetupTaskResult {
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	unlockSession := c.lockLoginSession(task.LoginSessionId)
+	unlockSession := c.lockSession(task.LoginSessionId)
 	defer unlockSession()
 
 	requestLogger.Log(c.processingLogLevel, "processing", zap.String("loginSessionId", task.LoginSessionId), zap.String("username", task.User))
@@ -119,14 +119,10 @@ func (c *Cognito) processMFASetupTask(task mfaSetupTask) *mfaSetupTaskResult {
 		}
 
 		return &mfaSetupTaskResult{
-			withNextLoginStep: withNextLoginStep{
-				nextLoginStep: &NextLoginStep{
-					NextStep:       NextStepMFASoftwareTokenSetupVerify,
-					LoginSessionId: task.LoginSessionId,
-					withPayload: withPayload{
-						Payload: associateResult.SecretCode,
-					},
-				},
+			nextLoginStep: &NextLoginStep{
+				NextStep:       NextStepMFASoftwareTokenSetupVerify,
+				LoginSessionId: task.LoginSessionId,
+				Payload:        associateResult.SecretCode,
 			},
 		}
 	}

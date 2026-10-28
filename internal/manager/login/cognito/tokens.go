@@ -30,6 +30,17 @@ func (c *Cognito) resolveAuthToken(ctx context.Context, auth any) (*loginTypes.A
 	panic("unknown auth type")
 }
 
+func extractClaim(token *jwt.Token, claim string) (any, bool) {
+	if token.Valid && token.Claims != nil {
+		if claims, ok := token.Claims.(jwt.MapClaims); token.Valid && ok {
+			if v, ok := claims[claim]; ok {
+				return v, true
+			}
+		}
+	}
+	return nil, false
+}
+
 func (c *Cognito) validateTokenOrigin(token string) loginTypes.GenericError {
 	t, err := c.jwksValidator.ParseToken(token)
 	if t == nil || t.Claims == nil {
