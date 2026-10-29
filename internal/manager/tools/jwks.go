@@ -7,6 +7,9 @@ import (
 import "github.com/golang-jwt/jwt/v5"
 import "github.com/MicahParks/keyfunc/v3"
 
+// validMethods are the signing algorithms accepted for tokens; Cognito signs its tokens with RS256
+var validMethods = []string{"RS256"}
+
 type JWKSValidator struct {
 	jwks             keyfunc.Keyfunc
 	expectedIssuer   string
@@ -30,6 +33,7 @@ func NewJWKSValidator(jwksURL, issuer, audience string) (*JWKSValidator, error) 
 func (v *JWKSValidator) ValidateToken(tokenString string) (*jwt.Token, error) {
 	parseOptions := make([]jwt.ParserOption, 0, 4)
 	parseOptions = append(parseOptions,
+		jwt.WithValidMethods(validMethods),
 		jwt.WithExpirationRequired(),
 		jwt.WithLeeway(5*time.Second))
 
@@ -55,7 +59,7 @@ func (v *JWKSValidator) ValidateToken(tokenString string) (*jwt.Token, error) {
 }
 
 func (v *JWKSValidator) ParseToken(tokenString string) (*jwt.Token, error) {
-	token, err := jwt.Parse(tokenString, v.jwks.Keyfunc)
+	token, err := jwt.Parse(tokenString, v.jwks.Keyfunc, jwt.WithValidMethods(validMethods))
 
 	if err != nil {
 		return nil, fmt.Errorf("token parsing failed: %w", err)

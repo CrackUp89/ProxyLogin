@@ -50,7 +50,6 @@ type Cognito struct {
 	sessionStorage SessionStorage
 	csrf           *tools.CSRF
 
-	loginSessionMutexManager             tools.NamedMutexManager
 	verifyUserMFATokenOnLoginLimiter     ratelimiter.TotalLimiter
 	verifyUserMFATokenOnLoginLimiterOnce sync.Once
 

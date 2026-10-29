@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	loginTypes "proxylogin/internal/manager/login/types"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
 	cognitoTypes "github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider/types"
 	"go.uber.org/zap"
 )
+
+const userAttributesPrefix = "userAttributes."
 
 type satisfyPasswordUpdateRequestTaskResult loginStepResult
 
@@ -55,7 +58,10 @@ func (c *Cognito) processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUp
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	unlockSession := c.lockSession(task.LoginSessionId)
+	unlockSession, lockErr := c.lockSession(task.Context, task.LoginSessionId)
+	if lockErr != nil {
+		return ef(lockErr)
+	}
 	defer unlockSession()
 
 	requestLogger.Log(c.processingLogLevel, "processing", zap.String("loginSessionId", task.LoginSessionId), zap.String("username", task.User))
@@ -85,6 +91,15 @@ func (c *Cognito) processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUp
 		},
 	}
 
+	//todo: source required attributes from tag
+	for name, value := range task.Attributes {
+		name = strings.TrimPrefix(name, userAttributesPrefix)
+		if name == "" {
+			continue
+		}
+		input.ChallengeResponses[userAttributesPrefix+name] = value
+	}
+
 	if c.cfg.Client.Secret != "" {
 		input.ChallengeResponses["SECRET_HASH"] = computeSecretHash(c.cfg.Client.Secret, task.User, c.cfg.Client.ID)
 	}
@@ -107,7 +122,7 @@ func (c *Cognito) processSatisfyPasswordUpdateRequestTask(task satisfyPasswordUp
 	if result.ChallengeName == "" {
 		if result.AuthenticationResult != nil {
 			if r := handleAuthResults(c, task.Task.Context, authenticationResultFromCognitoType(result.AuthenticationResult),
-				task.User, session.RememberUser, task.CSRFToken, task.LoginSessionId,
+				task.User, session.RememberUser, task.CSRFToken, task.LoginSessionId, c.cfg.EnforceMFA,
 				genericAuthResultFactory[satisfyPasswordUpdateRequestTaskResult], nsf, genericAuthErrorFactory[satisfyPasswordUpdateRequestTaskResult], requestLogger); r != nil {
 				return r
 			}

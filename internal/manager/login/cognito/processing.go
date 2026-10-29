@@ -103,12 +103,12 @@ func mapMFAList(mfaTypes []string) []loginTypes.MFAType {
 }
 
 func (c *Cognito) getUserFromAuthToken(ctx context.Context, accessToken string) (*cognitoidentityprovider.AdminGetUserOutput, loginTypes.GenericError) {
-	token, err := c.jwksValidator.ValidateToken(accessToken)
+	token, validationErr := c.validateAccessToken(accessToken)
 
 	var username string
 
-	if err != nil {
-		return nil, loginTypes.NewGenericAuthError("jwks validation failed", "invalid token", err)
+	if validationErr != nil {
+		return nil, validationErr
 	}
 
 	if claims, ok := token.Claims.(jwt.MapClaims); token.Valid && ok {

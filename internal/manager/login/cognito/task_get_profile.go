@@ -89,9 +89,9 @@ func (c *Cognito) processGetProfileTask(task getProfileTask) *getProfileTaskResu
 
 // cognitoIdTokenToProfile validates an ID token, checks that it belongs to subject and decodes the profile from it.
 func (c *Cognito) cognitoIdTokenToProfile(token, subject string) (*UserIdTokenProfile, error) {
-	t, err := c.jwksValidator.ValidateToken(token)
-	if err != nil {
-		return nil, err
+	t, validationErr := c.validateCognitoToken(token, idTokenUse)
+	if validationErr != nil {
+		return nil, validationErr
 	}
 
 	claimsMap, ok := t.Claims.(jwt.MapClaims)

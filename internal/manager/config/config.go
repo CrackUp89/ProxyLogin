@@ -56,7 +56,7 @@ var EnvBinds = map[string]string{
 	"token.cookies.accessCookieName":        "TOKEN_COOKIES_ACCESS_COOKIE_NAME",
 	"token.cookies.idCookieName":            "TOKEN_COOKIES_ID_COOKIE_NAME",
 	"token.cookies.refreshCookieName":       "TOKEN_COOKIES_REFRESH_COOKIE_NAME",
-	"token.cookies.masqueradedCookieName":   "TOKEN_COOKIES_MASQUADED_COOKIE_NAME",
+	"token.cookies.masqueradedCookieName":   "TOKEN_COOKIES_MASQUERADED_COOKIE_NAME",
 }
 
 func SetDefaultConfig(v *viper.Viper) {

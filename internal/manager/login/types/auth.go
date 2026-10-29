@@ -124,6 +124,7 @@ var GenericNoRefreshTokenError = NewGenericAuthError("unable to refresh tokens -
 var GenericNoClaimsError = NewGenericAuthError("unable to extract token claims", "invalid token", nil)
 var GenericNoClientIdError = NewGenericAuthError("auth token has no client ID", "invalid token", nil)
 var GenericInvalidClientIdError = NewGenericAuthError("auth token has invalid client ID", "invalid token", nil)
+var GenericInvalidTokenUseError = NewGenericAuthError("token has unexpected token_use", "invalid token", nil)
 var GenericNoIssuerError = NewGenericAuthError("auth token has no issuer", "invalid token", nil)
 var GenericInvalidIssuerError = NewGenericAuthError("auth token has invalid issuer", "invalid token", nil)
 

@@ -216,7 +216,7 @@ func newTaskAppendFunc[T processableTask](c *Cognito, taskLimit int64) (appender
 			defer lock.Unlock()
 
 			if atomic.LoadInt64(&counter) >= taskLimit {
-				return types.NewTooManyTasks(fmt.Sprint(task))
+				return types.NewTooManyTasks(fmt.Sprintf("%T", task))
 			}
 			atomic.AddInt64(&counter, 1)
 			c.tasks <- taskWrapper{done, task}

@@ -53,7 +53,10 @@ func (c *Cognito) processLoginTask(task loginTask) *loginStepResult {
 
 	loginSessionId := task.LoginSessionId
 
-	unlockSession := c.lockSession(loginSessionId)
+	unlockSession, lockErr := c.lockSession(task.Context, loginSessionId)
+	if lockErr != nil {
+		return ef(lockErr)
+	}
 	defer unlockSession()
 
 	requestLogger.Log(c.processingLogLevel, "processing", zap.String("loginSessionId", loginSessionId), zap.String("username", task.User))
@@ -115,7 +118,7 @@ func (c *Cognito) processLoginTask(task loginTask) *loginStepResult {
 	if result.ChallengeName == "" {
 		if result.AuthenticationResult != nil {
 			if r := handleAuthResults(c, task.Task.Context, authenticationResultFromCognitoType(result.AuthenticationResult),
-				task.User, task.RememberUser, task.CSRFToken, nextLoginSessionId,
+				task.User, task.RememberUser, task.CSRFToken, nextLoginSessionId, c.cfg.EnforceMFA,
 				genericAuthResultFactory[loginStepResult], nsf, genericAuthErrorFactory[loginStepResult], requestLogger); r != nil {
 				return r
 			}

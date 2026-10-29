@@ -85,6 +85,15 @@ func (l *limitValidator) add(limiter ratelimiter.Limiter, key string) *limitVali
 	return l
 }
 
+// addOptional adds a limiter only when key is set, for limits on optional request fields; an empty key would
+// otherwise put every request without the field into one shared bucket
+func (l *limitValidator) addOptional(limiter ratelimiter.Limiter, key string) *limitValidator {
+	if key == "" {
+		return l
+	}
+	return l.add(limiter, key)
+}
+
 func (l *limitValidator) validate() error {
 	var err error
 	for _, limit := range l.limits {
@@ -308,8 +317,13 @@ func getRefreshTokenFromContext(ctx context.Context) string {
 	return readStringFromContext(ctx, RefreshTokenContextVarName)
 }
 
-func getLoginSessionIdFromContext(ctx context.Context) string {
-	return readStringFromContext(ctx, LoginSessionContextVarName)
+// requireLoginSessionId returns the login session id sent with a login flow request.
+func requireLoginSessionId(ctx context.Context) (string, error) {
+	loginSessionId := readStringFromContext(ctx, LoginSessionContextVarName)
+	if loginSessionId == "" {
+		return "", humaTools.MapError(types.GenericMissingLoginSessionIdError)
+	}
+	return loginSessionId, nil
 }
 
 func getCSRFTokenFromContext(ctx context.Context) string {
@@ -628,9 +642,9 @@ func (c *Cognito) registerLogin(api huma.API) {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 
-		sessionId := getLoginSessionIdFromContext(ctx)
-		if sessionId == "" {
-			return nil, humaTools.MapError(types.GenericMissingLoginSessionIdError)
+		sessionId, err := requireLoginSessionId(ctx)
+		if err != nil {
+			return nil, err
 		}
 
 		csrfToken, err := c.requireCSRFToken(ctx)
@@ -652,8 +666,6 @@ func (c *Cognito) registerLogin(api huma.API) {
 			logError(taskErr, ctx)
 			return nil, humaTools.MapError(taskErr)
 		}
-
-		c.dropUserMFATokenOnLoginLimiter(ctx, input.Body.User)
 
 		return c.buildLoginTaskResponse(ctx, <-trc)
 	})
@@ -791,22 +803,22 @@ func (c *Cognito) registerMFASetup(api huma.API) {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 
+		sessionId, err := requireLoginSessionId(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		csrfToken, err := c.requireCSRFToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+
 		rm, _ := httpTools.GetRequestMetadataFromContext(ctx)
 		if err := newLimitValidator(ctx).
 			add(userLimiter, input.Body.User).
 			add(addressLimiter, rm.GetClientIP()).
 			add(totalLimiter, "total").
 			validate(); err != nil {
-			return nil, err
-		}
-
-		sessionId := getLoginSessionIdFromContext(ctx)
-		if sessionId == "" {
-			return nil, humaTools.MapError(types.GenericMissingLoginSessionIdError)
-		}
-
-		csrfToken, err := c.requireCSRFToken(ctx)
-		if err != nil {
 			return nil, err
 		}
 
@@ -837,22 +849,22 @@ func (c *Cognito) registerMFASetupVerifyToken(api huma.API) {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 
+		sessionId, err := requireLoginSessionId(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		csrfToken, err := c.requireCSRFToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+
 		rm, _ := httpTools.GetRequestMetadataFromContext(ctx)
 		if err := newLimitValidator(ctx).
 			add(userLimiter, input.Body.User).
 			add(addressLimiter, rm.GetClientIP()).
 			add(totalLimiter, "total").
 			validate(); err != nil {
-			return nil, err
-		}
-
-		sessionId := getLoginSessionIdFromContext(ctx)
-		if sessionId == "" {
-			return nil, humaTools.MapError(types.GenericMissingLoginSessionIdError)
-		}
-
-		csrfToken, err := c.requireCSRFToken(ctx)
-		if err != nil {
 			return nil, err
 		}
 
@@ -889,6 +901,16 @@ func (c *Cognito) registerMFAVerify(api huma.API) {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 
+		sessionId, err := requireLoginSessionId(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		csrfToken, err := c.requireCSRFToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+
 		rm, _ := httpTools.GetRequestMetadataFromContext(ctx)
 		if err := newLimitValidator(ctx).
 			add(userLimiter, input.Body.User).
@@ -898,21 +920,12 @@ func (c *Cognito) registerMFAVerify(api huma.API) {
 			return nil, err
 		}
 
-		sessionId := getLoginSessionIdFromContext(ctx)
-		if sessionId == "" {
-			return nil, humaTools.MapError(types.GenericMissingLoginSessionIdError)
-		}
-
-		csrfToken, err := c.requireCSRFToken(ctx)
-		if err != nil {
-			return nil, err
-		}
-
-		if allowed, err := c.getVerifyUserMFATokenOnLoginLimiter().Allow(ctx, input.Body.User); err != nil {
+		// attempts are counted per login session: a new session (and so a new budget) requires the password again
+		if allowed, err := c.getVerifyUserMFATokenOnLoginLimiter().Allow(ctx, sessionId); err != nil {
 			logError(types.NewInternalError("limiter error", err), ctx)
 			return nil, humaTools.MapError(types.NewInternalError("limiter error", err))
 		} else if !allowed {
-			c.dropUserMFATokenOnLoginLimiter(ctx, input.Body.User)
+			c.dropUserMFATokenOnLoginLimiter(ctx, sessionId)
 			dropUserLoginSession(ctx, sessionId)
 			logError(types.GenericUnauthorizedError, ctx)
 			return nil, humaTools.MapError(types.GenericUnauthorizedError)
@@ -928,7 +941,7 @@ func (c *Cognito) registerMFAVerify(api huma.API) {
 
 		resp, err := c.buildLoginTaskResponse(ctx, taskResult)
 		if err == nil {
-			c.dropUserMFATokenOnLoginLimiter(ctx, input.Body.User)
+			c.dropUserMFATokenOnLoginLimiter(ctx, sessionId)
 		}
 
 		return resp, err
@@ -952,22 +965,22 @@ func (c *Cognito) registerSelectMFA(api huma.API) {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 
+		sessionId, err := requireLoginSessionId(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		csrfToken, err := c.requireCSRFToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+
 		rm, _ := httpTools.GetRequestMetadataFromContext(ctx)
 		if err := newLimitValidator(ctx).
 			add(userLimiter, input.Body.User).
 			add(addressLimiter, rm.GetClientIP()).
 			add(totalLimiter, "total").
 			validate(); err != nil {
-			return nil, err
-		}
-
-		sessionId := getLoginSessionIdFromContext(ctx)
-		if sessionId == "" {
-			return nil, humaTools.MapError(types.GenericMissingLoginSessionIdError)
-		}
-
-		csrfToken, err := c.requireCSRFToken(ctx)
-		if err != nil {
 			return nil, err
 		}
 
@@ -998,9 +1011,14 @@ func (c *Cognito) registerSatisfyPasswordUpdate(api huma.API) {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 
-		sessionId := getLoginSessionIdFromContext(ctx)
-		if sessionId == "" {
-			return nil, humaTools.MapError(types.GenericMissingLoginSessionIdError)
+		sessionId, err := requireLoginSessionId(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		csrfToken, err := c.requireCSRFToken(ctx)
+		if err != nil {
+			return nil, err
 		}
 
 		rm, _ := httpTools.GetRequestMetadataFromContext(ctx)
@@ -1009,11 +1027,6 @@ func (c *Cognito) registerSatisfyPasswordUpdate(api huma.API) {
 			add(addressLimiter, rm.GetClientIP()).
 			add(totalLimiter, "total").
 			validate(); err != nil {
-			return nil, err
-		}
-
-		csrfToken, err := c.requireCSRFToken(ctx)
-		if err != nil {
 			return nil, err
 		}
 
@@ -1123,7 +1136,7 @@ func (c *Cognito) registerRefreshToken(api huma.API) {
 		rm, _ := httpTools.GetRequestMetadataFromContext(ctx)
 		if err := newLimitValidator(ctx).
 			add(tokenLimiter, token).
-			add(userLimiter, input.Body.User).
+			addOptional(userLimiter, input.Body.User).
 			add(addressLimiter, rm.GetClientIP()).
 			add(totalLimiter, "total").
 			validate(); err != nil {
@@ -1217,17 +1230,17 @@ func (c *Cognito) registerUpdatePassword(api huma.API) {
 			return nil, humaTools.MapError(types.GenericUnauthorizedError)
 		}
 
+		updateSessionId, csrfToken, err := c.requireUpdateSession(ctx)
+		if err != nil {
+			return nil, err
+		}
+
 		rm, _ := httpTools.GetRequestMetadataFromContext(ctx)
 		if err := newLimitValidator(ctx).
 			add(tokenLimiter, token).
 			add(addressLimiter, rm.GetClientIP()).
 			add(totalLimiter, "total").
 			validate(); err != nil {
-			return nil, err
-		}
-
-		updateSessionId, csrfToken, err := c.requireUpdateSession(ctx)
-		if err != nil {
 			return nil, err
 		}
 
@@ -1321,17 +1334,17 @@ func (c *Cognito) registerUpdateMFASoftwareToken(api huma.API) {
 			return nil, humaTools.MapError(types.GenericUnauthorizedError)
 		}
 
+		updateSessionId, csrfToken, err := c.requireUpdateSession(ctx)
+		if err != nil {
+			return nil, err
+		}
+
 		rm, _ := httpTools.GetRequestMetadataFromContext(ctx)
 		if err := newLimitValidator(ctx).
 			add(tokenLimiter, token).
 			add(addressLimiter, rm.GetClientIP()).
 			add(totalLimiter, "total").
 			validate(); err != nil {
-			return nil, err
-		}
-
-		updateSessionId, csrfToken, err := c.requireUpdateSession(ctx)
-		if err != nil {
 			return nil, err
 		}
 
@@ -1378,17 +1391,17 @@ func (c *Cognito) registerVerifyUpdateMFASoftwareToken(api huma.API) {
 			return nil, humaTools.MapError(types.GenericUnauthorizedError)
 		}
 
+		updateSessionId, csrfToken, err := c.requireUpdateSession(ctx)
+		if err != nil {
+			return nil, err
+		}
+
 		rm, _ := httpTools.GetRequestMetadataFromContext(ctx)
 		if err := newLimitValidator(ctx).
 			add(tokenLimiter, token).
 			add(addressLimiter, rm.GetClientIP()).
 			add(totalLimiter, "total").
 			validate(); err != nil {
-			return nil, err
-		}
-
-		updateSessionId, csrfToken, err := c.requireUpdateSession(ctx)
-		if err != nil {
 			return nil, err
 		}
 
@@ -1412,6 +1425,7 @@ func (c *Cognito) registerVerifyUpdateMFASoftwareToken(api huma.API) {
 
 func (c *Cognito) registerInitiatePasswordReset(api huma.API) {
 	emailLimiter := c.newRateLimiter("passwordResetRequestPerEmail")
+	emailAddressLimiter := c.newRateLimiter("passwordResetRequestPerEmailAndRemoteAddress")
 	addressLimiter := c.newRateLimiter("passwordResetRequestPerRemoteAddress")
 	totalLimiter := c.newRateLimiter("passwordResetRequestTotal")
 
@@ -1431,11 +1445,16 @@ func (c *Cognito) registerInitiatePasswordReset(api huma.API) {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 
+		// layered limits: the per email and address limit is strict but only affects the requesting client, while the
+		// looser per email limit caps how many emails a single address can receive, so a third party can't block a user's reset
 		rm, _ := httpTools.GetRequestMetadataFromContext(ctx)
+		clientIP := rm.GetClientIP()
+		email := strings.ToLower(strings.TrimSpace(input.Body.Email))
 		if err := newLimitValidator(ctx).
-			add(emailLimiter, input.Body.Email).
-			add(addressLimiter, rm.GetClientIP()).
 			add(totalLimiter, "total").
+			add(addressLimiter, clientIP).
+			add(emailAddressLimiter, email+"|"+clientIP).
+			add(emailLimiter, email).
 			validate(); err != nil {
 			return nil, err
 		}
@@ -1728,9 +1747,14 @@ func (c *Cognito) registerExternalLoginRequest(api huma.API) {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 
-		sessionId := getLoginSessionIdFromContext(ctx)
-		if sessionId == "" {
-			return nil, humaTools.MapError(types.GenericMissingLoginSessionIdError)
+		sessionId, err := requireLoginSessionId(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		csrfToken, err := c.requireCSRFToken(ctx)
+		if err != nil {
+			return nil, err
 		}
 
 		rm, _ := httpTools.GetRequestMetadataFromContext(ctx)
@@ -1739,11 +1763,6 @@ func (c *Cognito) registerExternalLoginRequest(api huma.API) {
 			add(addressLimiter, rm.GetClientIP()).
 			add(totalLimiter, "total").
 			validate(); err != nil {
-			return nil, err
-		}
-
-		csrfToken, err := c.requireCSRFToken(ctx)
-		if err != nil {
 			return nil, err
 		}
 

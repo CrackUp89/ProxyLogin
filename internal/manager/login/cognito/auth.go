@@ -18,6 +18,8 @@ type AuthenticationResult struct {
 	AccessToken  *string `json:"access_token"`
 	IdToken      *string `json:"id_token"`
 	RefreshToken *string `json:"refresh_token"`
+	// ClientID is the app client the tokens were issued to; empty means the main client
+	ClientID string `json:"client_id,omitempty"`
 }
 
 func authenticationResultFromCognitoType(authResult *cognitoTypes.AuthenticationResultType) *AuthenticationResult {
@@ -79,13 +81,14 @@ func getDurationFromTokenValidity(tokenValidity int32, unitType cognitoTypes.Tim
 	panic(fmt.Sprintf("invalid token validity unit type: %s", unitType))
 }
 
-func (c *Cognito) authResultToMasqueradedToken(ctx context.Context, authResult *AuthenticationResult, user string) (*loginTypes.MasqueradedToken, error) {
-	key, err := c.masq.GetNewKey(ctx)
-	if err != nil {
-		return nil, err
+// authResultToMasqueradeTokenSet converts an auth result into a masquerade token set and returns the latest expiry of its tokens
+func (c *Cognito) authResultToMasqueradeTokenSet(authResult *AuthenticationResult) (masquerade.TokenSet, time.Time, error) {
+	var expires time.Time
+
+	if authResult.AccessToken == nil || authResult.IdToken == nil {
+		return nil, expires, errors.New("auth result has no access or id token")
 	}
 
-	var expires time.Time
 	tokenSet := make(masquerade.TokenSet, 3)
 
 	authTokenRecord := masquerade.TokenRecord{
@@ -103,7 +106,7 @@ func (c *Cognito) authResultToMasqueradedToken(ctx context.Context, authResult *
 			}
 		}
 	} else {
-		return nil, err
+		return nil, expires, err
 	}
 
 	if idToken, err := c.jwksValidator.ParseToken(*authResult.IdToken); err == nil {
@@ -114,7 +117,7 @@ func (c *Cognito) authResultToMasqueradedToken(ctx context.Context, authResult *
 			}
 		}
 	} else {
-		return nil, err
+		return nil, expires, err
 	}
 
 	tokenSet[loginTypes.AuthTokenType] = authTokenRecord
@@ -139,9 +142,24 @@ func (c *Cognito) authResultToMasqueradedToken(ctx context.Context, authResult *
 		}
 	}
 
+	return tokenSet, expires, nil
+}
+
+func (c *Cognito) authResultToMasqueradedToken(ctx context.Context, authResult *AuthenticationResult, user string) (*loginTypes.MasqueradedToken, error) {
+	key, err := c.masq.GetNewKey(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	tokenSet, expires, err := c.authResultToMasqueradeTokenSet(authResult)
+	if err != nil {
+		return nil, err
+	}
+
 	mr := &masquerade.MasqueradedRecord{
-		Tokens: tokenSet,
-		User:   user,
+		Tokens:   tokenSet,
+		User:     user,
+		ClientID: authResult.ClientID,
 	}
 
 	err = c.masq.Storage().StoreMasqueradedRecord(ctx, key, mr, expires)
@@ -180,7 +198,7 @@ type nextStepFactory[R any, PR interface {
 func enforceMFAAfterAuth[R any, PR interface {
 	*R
 	WithTaskResultBase
-}](c *Cognito, ctx context.Context, csrfToken, loginSessionId string, authResults *AuthenticationResult, rememberUser bool,
+}](c *Cognito, ctx context.Context, csrfToken, loginSessionId string, authResults *AuthenticationResult, user string, rememberUser bool,
 	nsf nextStepFactory[R, PR], ef authErrorFactory[R, PR], logger *zap.Logger) PR {
 	if c.poolDescription.MfaConfiguration == cognitoTypes.UserPoolMfaTypeOff {
 		logger.Error("unable to enforce mfa - MFA is disabled in the User Pool configuration")
@@ -222,7 +240,7 @@ func enforceMFAAfterAuth[R any, PR interface {
 
 		expires := time.Now().Add(c.loginSessionValidFor)
 
-		if err := c.sessionStorage.CreateMFAEnforcementSession(ctx, loginSessionId, rememberUser, authResults, expires); err != nil {
+		if err := c.sessionStorage.CreateMFAEnforcementSession(ctx, loginSessionId, user, rememberUser, authResults, expires); err != nil {
 			return ef(loginTypes.NewInternalError("failed to create MFA enforcement session", err), false)
 		}
 
@@ -261,11 +279,11 @@ func handleAuthResults[R any, PR interface {
 	WithTaskResultBase
 }](c *Cognito, ctx context.Context, authResults *AuthenticationResult, user string, remember bool,
 	csrfToken,
-	loginSessionId string,
+	loginSessionId string, enforceMFA bool,
 	rf authResultsFactory[R, PR], nsf nextStepFactory[R, PR], ef authErrorFactory[R, PR], logger *zap.Logger) PR {
 
-	if c.cfg.EnforceMFA {
-		if r := enforceMFAAfterAuth(c, ctx, csrfToken, loginSessionId, authResults, remember, nsf, ef, logger); r != nil {
+	if enforceMFA {
+		if r := enforceMFAAfterAuth(c, ctx, csrfToken, loginSessionId, authResults, user, remember, nsf, ef, logger); r != nil {
 			return r
 		}
 	}

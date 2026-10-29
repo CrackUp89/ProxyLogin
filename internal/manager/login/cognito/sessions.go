@@ -48,6 +48,7 @@ func (l LoginSession) GetExpirationTime() time.Time {
 type MFAEnforcementSession struct {
 	Created              time.Time             `json:"created"`
 	Expires              time.Time             `json:"expires"`
+	User                 string                `json:"user,omitempty"`
 	RememberUser         bool                  `json:"rememberUser"`
 	AuthenticationResult *AuthenticationResult `json:"authenticationResult"`
 }
@@ -104,7 +105,7 @@ type SessionStorage interface {
 	DropConfirmPasswordResetSession(ctx context.Context, id string) error
 
 	GetMFAEnforcementSession(ctx context.Context, id string) (*MFAEnforcementSession, error)
-	CreateMFAEnforcementSession(ctx context.Context, id string, rememberUser bool, authenticationResult *AuthenticationResult, expires time.Time) error
+	CreateMFAEnforcementSession(ctx context.Context, id string, user string, rememberUser bool, authenticationResult *AuthenticationResult, expires time.Time) error
 	DropMFAEnforcementSession(ctx context.Context, id string) error
 
 	HasUpdateSession(ctx context.Context, id string) (bool, error)
@@ -167,24 +168,23 @@ func (c *Cognito) startLocalStorageCleanupRoutine() func() {
 	}
 }
 
-// lockSession locks a login or update session by id. Session ids are random, so both kinds share one lock space.
-func (c *Cognito) lockSession(id string) func() {
+// sessionLockTTL bounds how long a session stays locked if its holder dies (redis storage only); tasks run with a 60s timeout
+const sessionLockTTL = 60 * time.Second
+
+// lockSession locks a login or update session by id, across all instances when storage is redis.
+// Session ids are random, so both kinds share one lock space. The returned unlock func is safe to call more than once.
+func (c *Cognito) lockSession(ctx context.Context, id string) (func(), loginTypes.GenericError) {
 	if id == "" {
 		getSessionsLogger().Warn("can not lock session - session key is empty", zap.Stack("stack"))
 		return func() {
 			getSessionsLogger().Warn("can not unlock session - session key is empty", zap.Stack("stack"))
-		}
+		}, nil
 	}
-	lock := c.loginSessionMutexManager.GetNamedMutex(id)
-	lock.Lock()
-
-	var unlockSessionOnce sync.Once
-	unlockSessionOnceDo := func() {
-		unlockSessionOnce.Do(func() {
-			lock.Unlock()
-		})
+	unlock, err := c.locks.Lock(ctx, "session:"+id, sessionLockTTL)
+	if err != nil {
+		return nil, loginTypes.NewInternalError("unable to lock session", err)
 	}
-	return unlockSessionOnceDo
+	return unlock, nil
 }
 
 type LocalSessionStore struct {
@@ -237,10 +237,11 @@ func (l *LocalSessionStore) GetMFAEnforcementSession(_ context.Context, key stri
 	return nil, nil
 }
 
-func (l *LocalSessionStore) CreateMFAEnforcementSession(_ context.Context, key string, rememberUser bool, authenticationResult *AuthenticationResult, expires time.Time) error {
+func (l *LocalSessionStore) CreateMFAEnforcementSession(_ context.Context, key string, user string, rememberUser bool, authenticationResult *AuthenticationResult, expires time.Time) error {
 	l.activeMFAEnforcementSessions.Store(key, &MFAEnforcementSession{
 		Created:              time.Now(),
 		Expires:              expires,
+		User:                 user,
 		RememberUser:         rememberUser,
 		AuthenticationResult: authenticationResult,
 	})
@@ -440,7 +441,7 @@ func (r *RedisSessionStore) GetMFAEnforcementSession(ctx context.Context, id str
 	return nil, nil
 }
 
-func (r *RedisSessionStore) CreateMFAEnforcementSession(ctx context.Context, id string, rememberUser bool, authenticationResult *AuthenticationResult, expires time.Time) error {
+func (r *RedisSessionStore) CreateMFAEnforcementSession(ctx context.Context, id string, user string, rememberUser bool, authenticationResult *AuthenticationResult, expires time.Time) error {
 	clientWrapper := r.client
 	client := clientWrapper.Client()
 
@@ -448,6 +449,7 @@ func (r *RedisSessionStore) CreateMFAEnforcementSession(ctx context.Context, id 
 	session := &MFAEnforcementSession{
 		Created:              time.Now(),
 		Expires:              expires,
+		User:                 user,
 		RememberUser:         rememberUser,
 		AuthenticationResult: authenticationResult,
 	}
@@ -681,7 +683,11 @@ func (c *Cognito) reserveNewSessionId(ctx context.Context, exists func(ctx conte
 		if err != nil {
 			return "", nil, loginTypes.NewInternalError("failed to generate new login session id", err)
 		}
-		unlockSession = c.lockSession(loginSessionId)
+		var lockErr loginTypes.GenericError
+		unlockSession, lockErr = c.lockSession(ctx, loginSessionId)
+		if lockErr != nil {
+			return "", nil, lockErr
+		}
 		taken, err := exists(ctx, loginSessionId)
 		if err != nil {
 			unlockSession()

@@ -7,6 +7,6 @@ Requires the login session cookie and CSRF header from `/v1/login/start`.
 **Request fields**:
 - `user` *(required)* — username or email address.
 - `password` *(required)* — new password chosen by the user.
-- `attributes` *(optional)* — map of additional user attributes required by the pool (keys are listed in `payload.required` of the preceding step).
+- `attributes` *(optional)* — map of additional user attributes required by the pool (keys are listed in `payload.required` of the preceding step). Keys may be given with or without the `userAttributes.` prefix, e.g. `{"email": "user@example.com"}`.
 
 **On success**: the password is updated and the login flow continues. The response may contain a further `next_step` (e.g. MFA setup) or, if no more steps are required, tokens are delivered using the same mechanism as the `/v1/login` endpoint.

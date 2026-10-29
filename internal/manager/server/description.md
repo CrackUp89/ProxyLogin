@@ -69,9 +69,9 @@ POST /v1/login
 
 **`POST /v1/login/mfa/select`** — Required when the user has more than one MFA method enrolled and Cognito asks them to choose. The preceding response includes `available_mfa_methods`; submit one as `mfa_type`.
 
-**`POST /v1/login/mfa/verify`** — Submits the one-time code for the chosen MFA method (`software_token`, `sms`, or `email`). Each user gets `limits.mfaVerifyMaxAttempts` attempts (default 3); once exceeded, the session is invalidated and the user must restart login.
+**`POST /v1/login/mfa/verify`** — Submits the one-time code for the chosen MFA method (`software_token`, `sms`, or `email`). Each login session gets `limits.mfaVerifyMaxAttempts` attempts (default 3); once exceeded, the session is invalidated and the user must restart login.
 
-**`POST /v1/login/external`** — Log in with an authorization code from an external identity provider. Not implemented yet.
+**`POST /v1/login/external`** — Log in with an authorization code from the Cognito hosted UI or an external identity provider. Completes like `/v1/login`; MFA setup is only enforced when `cognito.external.enforceMFA` is enabled.
 
 ### CSRF protection
 
@@ -161,4 +161,4 @@ The update session is bound to the user who started it. It is closed, and its co
 
 ## Rate limits
 
-Every endpoint is rate limited per user, token, email or remote address, plus a total limit. Limits are configured under `limits.rate.<name>.limit` and `limits.rate.<name>.window` (window in seconds). Exceeding a limit returns `429`.
+Every endpoint is rate limited per user, token, email or remote address, plus a total limit. Limits are configured under `limits.rate.<name>.limit` and `limits.rate.<name>.window` (window in seconds). Each limit is a token bucket: up to `limit` requests at once, refilled evenly over `window`. Exceeding a limit returns `429`.

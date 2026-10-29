@@ -60,7 +60,10 @@ func (c *Cognito) processUpdateMFASoftwareTokenTask(task updateMFASoftwareTokenT
 		return r
 	}
 
-	unlockSession := c.lockSession(task.UpdateSessionId)
+	unlockSession, lockErr := c.lockSession(task.Context, task.UpdateSessionId)
+	if lockErr != nil {
+		return ef(lockErr)
+	}
 	defer unlockSession()
 
 	tokenSet, r := checkAuth(c, task.Task.Context, task.Auth, ef)

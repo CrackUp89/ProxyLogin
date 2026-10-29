@@ -51,7 +51,10 @@ func (c *Cognito) processMFASetupTask(task mfaSetupTask) *mfaSetupTaskResult {
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	unlockSession := c.lockSession(task.LoginSessionId)
+	unlockSession, lockErr := c.lockSession(task.Context, task.LoginSessionId)
+	if lockErr != nil {
+		return ef(lockErr)
+	}
 	defer unlockSession()
 
 	requestLogger.Log(c.processingLogLevel, "processing", zap.String("loginSessionId", task.LoginSessionId), zap.String("username", task.User))
@@ -113,7 +116,7 @@ func (c *Cognito) processMFASetupTask(task mfaSetupTask) *mfaSetupTaskResult {
 		}
 
 		if mfaSession != nil {
-			if err := c.sessionStorage.CreateMFAEnforcementSession(task.Context, task.LoginSessionId, session.RememberUser, mfaSession.AuthenticationResult, expiration); err != nil {
+			if err := c.sessionStorage.CreateMFAEnforcementSession(task.Context, task.LoginSessionId, mfaSession.User, session.RememberUser, mfaSession.AuthenticationResult, expiration); err != nil {
 				return ef(loginTypes.NewInternalError("failed to create MFA enforcement session", err))
 			}
 		}

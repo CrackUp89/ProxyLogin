@@ -8,6 +8,6 @@ Requires the login session cookie and CSRF header from `/v1/login/start`.
 - `user` *(required)* — username or email address.
 - `code` *(required)* — one-time verification code.
 
-**Attempt limit**: each user gets `limits.mfaVerifyMaxAttempts` verification attempts (default 3). The counter resets on a successful verification and on every `/v1/login` call. Once the limit is exceeded, the login session is invalidated, `401` is returned, and the user must restart the login flow from `/v1/login/start`.
+**Attempt limit**: each login session gets `limits.mfaVerifyMaxAttempts` verification attempts (default 3). A new budget requires a new login session, i.e. entering the password again via `/v1/login`. Once the limit is exceeded, the login session is invalidated, `401` is returned, and the user must restart the login flow from `/v1/login/start`.
 
 **On success**: the login flow completes and tokens are delivered using the same mechanism as the `/v1/login` endpoint (cookies or response body, depending on configuration).

@@ -56,7 +56,10 @@ func (c *Cognito) processExternalLoginTask(task externalLoginTask) *loginStepRes
 
 	loginSessionId := task.LoginSessionId
 
-	unlockSession := c.lockSession(loginSessionId)
+	unlockSession, lockErr := c.lockSession(task.Context, loginSessionId)
+	if lockErr != nil {
+		return ef(lockErr)
+	}
 	defer unlockSession()
 
 	requestLogger.Log(c.processingLogLevel, "processing", zap.String("loginSessionId", loginSessionId))
@@ -118,19 +121,27 @@ func (c *Cognito) processExternalLoginTask(task externalLoginTask) *loginStepRes
 		return ef(types.NewInternalError("unable to parse response body", err))
 	}
 
-	if respBody.IdToken == nil && len(*respBody.IdToken) == 0 {
-		return ef(types.NewInternalError("no id token found in response body", err))
+	if respBody.AccessToken == nil || *respBody.AccessToken == "" {
+		return ef(types.NewInternalError("no access token found in response body", nil))
 	}
 
-	var user string
+	if respBody.IdToken == nil || *respBody.IdToken == "" {
+		return ef(types.NewInternalError("no id token found in response body", nil))
+	}
+
 	t, err := c.jwksValidator.ParseToken(*respBody.IdToken)
 	if err != nil {
 		return ef(types.NewInternalError("unable to extract user from id token", err))
 	}
 
-	if sub, ok := extractClaim(t, "sub"); ok {
-		if s, ok := sub.(string); ok {
-			user = s
+	// the Cognito user name addresses the user in later requests (e.g. the refresh SECRET_HASH); sub is a fallback
+	var user string
+	for _, claim := range []string{"cognito:username", "sub"} {
+		if v, ok := extractClaim(t, claim); ok {
+			if s, ok := v.(string); ok && s != "" {
+				user = s
+				break
+			}
 		}
 	}
 
@@ -138,8 +149,11 @@ func (c *Cognito) processExternalLoginTask(task externalLoginTask) *loginStepRes
 		AccessToken:  respBody.AccessToken,
 		IdToken:      respBody.IdToken,
 		RefreshToken: respBody.RefreshToken,
+		ClientID:     c.cfg.ExternalClient.ID,
 	}
 
-	return handleFinalAuthResults(c, task.Context, authResults, user, task.RememberUser,
-		genericAuthResultFactory[loginStepResult], genericAuthErrorFactory[loginStepResult])
+	return handleAuthResults(c, task.Context, authResults, user, task.RememberUser, task.CSRFToken, loginSessionId,
+		c.cfg.EnforceMFAForExternalLogin,
+		genericAuthResultFactory[loginStepResult], genericNextStepFactory[loginStepResult], genericAuthErrorFactory[loginStepResult],
+		requestLogger)
 }

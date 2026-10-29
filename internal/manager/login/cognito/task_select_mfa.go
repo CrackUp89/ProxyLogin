@@ -53,7 +53,10 @@ func (c *Cognito) processSelectMFATask(task selectMFATask) *selectMFATaskResult 
 
 	requestLogger.Log(c.processingLogLevel, "processing")
 
-	unlockSession := c.lockSession(task.LoginSessionId)
+	unlockSession, lockErr := c.lockSession(task.Context, task.LoginSessionId)
+	if lockErr != nil {
+		return ef(lockErr)
+	}
 	defer unlockSession()
 
 	requestLogger.Log(c.processingLogLevel, "processing", zap.String("loginSessionId", task.LoginSessionId), zap.String("mfaType", string(task.MFAType)))

@@ -83,9 +83,10 @@ var defaultRateLimits = map[string][2]int{
 	"mfaSoftwareTokenUpdateVerifyPerRemoteAddress": {10, 60},
 	"mfaSoftwareTokenUpdateVerifyTotal":            {100, 1},
 
-	"passwordResetRequestPerEmail":         {1, 300},
-	"passwordResetRequestPerRemoteAddress": {10, 60},
-	"passwordResetRequestTotal":            {100, 1},
+	"passwordResetRequestPerEmailAndRemoteAddress": {1, 60},
+	"passwordResetRequestPerEmail":                 {5, 3600},
+	"passwordResetRequestPerRemoteAddress":         {10, 60},
+	"passwordResetRequestTotal":                    {100, 1},
 
 	"passwordResetValidatePerToken":         {5, 1},
 	"passwordResetValidatePerRemoteAddress": {10, 60},

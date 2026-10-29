@@ -51,7 +51,10 @@ func (c *Cognito) processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoft
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	unlockSession := c.lockSession(task.LoginSessionId)
+	unlockSession, lockErr := c.lockSession(task.Context, task.LoginSessionId)
+	if lockErr != nil {
+		return ef(lockErr)
+	}
 	defer unlockSession()
 
 	requestLogger.Log(c.processingLogLevel, "processing", zap.String("loginSessionId", task.LoginSessionId), zap.String("username", task.User))
@@ -115,8 +118,14 @@ func (c *Cognito) processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoft
 			requestLogger.Error("failed to drop login session", zap.Error(err))
 		}
 
+		// the user stored when MFA enforcement started is authoritative; older sessions may not have it
+		user := mfaSession.User
+		if user == "" {
+			user = task.User
+		}
+
 		return handleFinalAuthResults(c, task.Task.Context, mfaSession.AuthenticationResult,
-			task.User, session.RememberUser,
+			user, session.RememberUser,
 			genericAuthResultFactory[mfaSetupVerifySoftwareTokenTaskResult], genericAuthErrorFactory[mfaSetupVerifySoftwareTokenTaskResult])
 	}
 
@@ -140,7 +149,7 @@ func (c *Cognito) processMFASetupVerifySoftwareTokenTask(task mfaSetupVerifySoft
 
 	if finalResult.AuthenticationResult != nil {
 		if r := handleAuthResults(c, task.Task.Context, authenticationResultFromCognitoType(finalResult.AuthenticationResult),
-			task.User, session.RememberUser, task.CSRFToken, task.LoginSessionId,
+			task.User, session.RememberUser, task.CSRFToken, task.LoginSessionId, c.cfg.EnforceMFA,
 			genericAuthResultFactory[mfaSetupVerifySoftwareTokenTaskResult], nsf, genericAuthErrorFactory[mfaSetupVerifySoftwareTokenTaskResult], requestLogger); r != nil {
 			return r
 		}

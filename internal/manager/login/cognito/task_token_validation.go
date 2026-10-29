@@ -49,12 +49,12 @@ func (c *Cognito) processValidateTask(task tokenValidationTask) *tokenValidation
 	validationError := map[string]string{}
 
 	for tokenName, token := range task.Tokens {
-		_, err := c.jwksValidator.ValidateToken(token)
+		_, err := c.validateCognitoToken(token, accessTokenUse, idTokenUse)
 		if err == nil {
 			validity[tokenName] = true
 		} else {
 			validity[tokenName] = false
-			validationError[tokenName] = err.Error()
+			validationError[tokenName] = err.PrivateError()
 		}
 	}
 

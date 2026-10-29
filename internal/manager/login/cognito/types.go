@@ -333,7 +333,7 @@ type LogOutInput struct {
 type satisfyPasswordUpdateRequest struct {
 	User       string            `json:"user" minLength:"1" doc:"Username"`
 	Password   string            `json:"password" minLength:"1" doc:"New password"`
-	Attributes map[string]string `json:"attributes,omitempty" doc:"Additional user attributes required by the pool, see payload.required of the new_password step"`
+	Attributes map[string]string `json:"attributes,omitempty" doc:"Additional user attributes required by the pool, see payload.required of the new_password step. Keys are attribute names (e.g. email or userAttributes.email)"`
 }
 
 type SatisfyPasswordUpdateInput struct {

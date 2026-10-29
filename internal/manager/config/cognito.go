@@ -12,17 +12,19 @@ type ClientConfig struct {
 // CognitoConfig lives here rather than in the cognito package because cognito
 // consumes the whole Config, so config can't import it.
 type CognitoConfig struct {
-	Client                   ClientConfig
-	ExternalClient           ClientConfig
-	JWKSIssuer               string
-	JWKSSigningKeyURL        string
-	TokenURL                 string
-	OpenIDConfigURL          string // not used yet
-	UserPoolID               string
-	EnforceMFA               bool
-	Workers                  uint64
-	LogAllRequests           bool
-	ExternalLoginRedirectURL string
+	Client            ClientConfig
+	ExternalClient    ClientConfig
+	JWKSIssuer        string
+	JWKSSigningKeyURL string
+	TokenURL          string
+	OpenIDConfigURL   string // not used yet
+	UserPoolID        string
+	EnforceMFA        bool
+	// EnforceMFAForExternalLogin applies the EnforceMFA flow (MFA setup when the user has none) to external logins
+	EnforceMFAForExternalLogin bool
+	Workers                    uint64
+	LogAllRequests             bool
+	ExternalLoginRedirectURL   string
 }
 
 var CognitoEnvBinds = map[string]string{
@@ -39,10 +41,12 @@ var CognitoEnvBinds = map[string]string{
 	"cognito.external.clientId":         "COGNITO_EXTERNAL_CLIENT_ID",
 	"cognito.external.clientSecret":     "COGNITO_EXTERNAL_CLIENT_SECRET",
 	"cognito.external.loginRedirectURL": "COGNITO_EXTERNAL_LOGIN_REDIRECT_URL",
+	"cognito.external.enforceMFA":       "COGNITO_EXTERNAL_ENFORCE_MFA",
 }
 
 func SetDefaultCognitoConfig(v *viper.Viper) {
 	v.SetDefault("cognito.enforceMFA", false)
+	v.SetDefault("cognito.external.enforceMFA", false)
 	v.SetDefault("cognito.workers", 1000)
 	v.SetDefault("cognito.logAllRequests", true)
 }
@@ -57,14 +61,15 @@ func LoadCognitoConfig(v *viper.Viper) (CognitoConfig, error) {
 			ID:     v.GetString("cognito.external.clientId"),
 			Secret: v.GetString("cognito.external.clientSecret"),
 		},
-		JWKSIssuer:               v.GetString("cognito.jwksIssuer"),
-		JWKSSigningKeyURL:        v.GetString("cognito.jwksSigningKeyURL"),
-		TokenURL:                 v.GetString("cognito.tokenURL"),
-		OpenIDConfigURL:          v.GetString("cognito.openIdConfigURL"),
-		UserPoolID:               v.GetString("cognito.userPoolId"),
-		EnforceMFA:               v.GetBool("cognito.enforceMFA"),
-		Workers:                  v.GetUint64("cognito.workers"),
-		LogAllRequests:           v.GetBool("cognito.logAllRequests"),
-		ExternalLoginRedirectURL: v.GetString("cognito.external.loginRedirectURL"),
+		JWKSIssuer:                 v.GetString("cognito.jwksIssuer"),
+		JWKSSigningKeyURL:          v.GetString("cognito.jwksSigningKeyURL"),
+		TokenURL:                   v.GetString("cognito.tokenURL"),
+		OpenIDConfigURL:            v.GetString("cognito.openIdConfigURL"),
+		UserPoolID:                 v.GetString("cognito.userPoolId"),
+		EnforceMFA:                 v.GetBool("cognito.enforceMFA"),
+		EnforceMFAForExternalLogin: v.GetBool("cognito.external.enforceMFA"),
+		Workers:                    v.GetUint64("cognito.workers"),
+		LogAllRequests:             v.GetBool("cognito.logAllRequests"),
+		ExternalLoginRedirectURL:   v.GetString("cognito.external.loginRedirectURL"),
 	}, nil
 }

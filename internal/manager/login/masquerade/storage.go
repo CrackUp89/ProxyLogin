@@ -69,6 +69,8 @@ type TokenSet = map[types.TokenType]TokenRecord
 type MasqueradedRecord struct {
 	Tokens TokenSet `json:"tokens"`
 	User   string   `json:"user"`
+	// ClientID is the app client the tokens were issued to; empty means the main client
+	ClientID string `json:"client_id,omitempty"`
 }
 
 type Storage interface {

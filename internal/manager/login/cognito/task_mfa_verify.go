@@ -52,7 +52,10 @@ func (c *Cognito) processMFAVerifyTask(task mfaVerifyTask) *mfaVerifyTaskResult 
 
 	requestLogger := getRequestLoggerFromTask(task.Task)
 
-	unlockSession := c.lockSession(task.LoginSessionId)
+	unlockSession, lockErr := c.lockSession(task.Context, task.LoginSessionId)
+	if lockErr != nil {
+		return ef(lockErr)
+	}
 	defer unlockSession()
 
 	if r := checkTaskContext(task.Task, ef); r != nil {
@@ -112,7 +115,7 @@ func (c *Cognito) verifyMFACode(session *LoginSession, task mfaVerifyTask, step 
 		break
 	case NextStepMFASMSVerify:
 		challengeResp.ChallengeName = cognitoTypes.ChallengeNameTypeSmsMfa
-		challengeResp.ChallengeResponses["SMS_OTP_CODE"] = task.Code
+		challengeResp.ChallengeResponses["SMS_MFA_CODE"] = task.Code
 		break
 	}
 
@@ -132,7 +135,7 @@ func (c *Cognito) verifyMFACode(session *LoginSession, task mfaVerifyTask, step 
 	if result.ChallengeName == "" {
 		if result.AuthenticationResult != nil {
 			if r := handleAuthResults(c, task.Task.Context, authenticationResultFromCognitoType(result.AuthenticationResult),
-				task.User, session.RememberUser, task.CSRFToken, task.LoginSessionId,
+				task.User, session.RememberUser, task.CSRFToken, task.LoginSessionId, c.cfg.EnforceMFA,
 				genericAuthResultFactory[mfaVerifyTaskResult], nsf, genericAuthErrorFactory[mfaVerifyTaskResult], requestLogger); r != nil {
 				return r
 			}

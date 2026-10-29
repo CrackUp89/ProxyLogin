@@ -2,9 +2,9 @@ package http
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"proxylogin/internal/manager/logging"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -140,13 +140,16 @@ func WithRequestMetadataContextMiddleware(cfg Config, next http.Handler) http.Ha
 	warnAboutSpoofableHeaders(cfg)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		remote := strings.Split(r.RemoteAddr, ":")
+		remoteAddr, remotePort, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			remoteAddr = r.RemoteAddr
+		}
 		md := &RequestMetadata{
 			ID:         uuid.NewString(),
 			Host:       r.Host,
 			RequestURI: r.RequestURI,
-			RemoteAddr: remote[0],
-			RemotePort: remote[1],
+			RemoteAddr: remoteAddr,
+			RemotePort: remotePort,
 		}
 
 		requestProxySecret, proxySecretValid, abort := validateProxySecret(cfg, r)

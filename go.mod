@@ -9,6 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.75.5
 	github.com/aws/aws-sdk-go-v2/service/ses v1.42.5
 	github.com/danielgtaylor/huma/v2 v2.40.0
+	github.com/go-redis/redis_rate/v10 v10.0.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/redis/go-redis/v9 v9.23.0
